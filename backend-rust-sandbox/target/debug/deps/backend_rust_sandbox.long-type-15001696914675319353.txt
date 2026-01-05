@@ -1,0 +1,2 @@
+fn(axum::http::Request<Body>, axum::Json<ToolExecutionRequest>) -> impl Future<Output = (StatusCode, axum::Json<ToolExecutionResponse>)> {execute_tool}
+fn(axum::http::Request<Body>, axum::Json<ToolExecutionRequest>) -> impl Future<Output = (StatusCode, axum::Json<ToolExecutionResponse>)> {execute_tool}: Handler<_, _>
