@@ -160,16 +160,70 @@ func (s *server) GetPlan(ctx context.Context, in *pb.PlanRequest) (*pb.PlanRespo
 		content = resp.Choices[0].Message.Content
 	}
 
-	// If the provider returns non-JSON, wrap it as JSON for consistency.
 	trimmed := strings.TrimSpace(content)
-	if !strings.HasPrefix(trimmed, "{") {
-		fallback := map[string]any{
+
+	// Normalize common LLM output formats into strict JSON:
+	// - raw JSON object
+	// - fenced code block containing JSON
+	// - non-JSON text (fallback wrapper)
+	stripFences := func(s string) string {
+		s = strings.TrimSpace(s)
+		if !strings.HasPrefix(s, "```") {
+			return s
+		}
+		// Drop the first fence line
+		if idx := strings.Index(s, "\n"); idx >= 0 {
+			s = s[idx+1:]
+		}
+		// Drop the trailing fence
+		if end := strings.LastIndex(s, "```"); end >= 0 {
+			s = s[:end]
+		}
+		return strings.TrimSpace(s)
+	}
+
+	normalizeJSON := func(raw string) (string, bool) {
+		candidate := strings.TrimSpace(raw)
+		if !strings.HasPrefix(candidate, "{") {
+			return "", false
+		}
+		var decoded struct {
+			Steps  []string `json:"steps"`
+			Prompt string   `json:"prompt"`
+		}
+		if err := json.Unmarshal([]byte(candidate), &decoded); err != nil {
+			return "", false
+		}
+		if len(decoded.Steps) == 0 {
+			return "", false
+		}
+		payload := map[string]any{
 			"model_type": provider,
-			"steps":      []string{trimmed},
+			"steps":      decoded.Steps,
 			"prompt":     in.GetPrompt(),
 		}
-		b, _ := json.Marshal(fallback)
-		trimmed = string(b)
+		b, _ := json.Marshal(payload)
+		return string(b), true
+	}
+
+	// 1) Try raw JSON
+	if normalized, ok := normalizeJSON(trimmed); ok {
+		trimmed = normalized
+	} else {
+		// 2) Try fenced JSON
+		fenced := stripFences(trimmed)
+		if normalized, ok := normalizeJSON(fenced); ok {
+			trimmed = normalized
+		} else {
+			// 3) Fallback wrapper
+			fallback := map[string]any{
+				"model_type": provider,
+				"steps":      []string{trimmed},
+				"prompt":     in.GetPrompt(),
+			}
+			b, _ := json.Marshal(fallback)
+			trimmed = string(b)
+		}
 	}
 
 	latencyMs := time.Since(requestStart).Milliseconds()
