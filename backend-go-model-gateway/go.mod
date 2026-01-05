@@ -3,6 +3,7 @@ module backend-go-model-gateway
 go 1.22
 
 require (
+	github.com/sashabaranov/go-openai v1.32.0
 	google.golang.org/grpc v1.65.0
 	google.golang.org/protobuf v1.34.2
 )

@@ -85,6 +85,14 @@ services:
     environment:
       - MODEL_GATEWAY_GRPC_PORT=${MODEL_GATEWAY_GRPC_PORT:-50051}
       - LOG_LEVEL=${LOG_LEVEL:-info}
+
+      # LLM provider switching
+      - LLM_PROVIDER=${LLM_PROVIDER:-openrouter}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_MODEL_NAME=${OPENROUTER_MODEL_NAME:-mistralai/mistral-7b-instruct:free}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://localhost:11434}
+      - OLLAMA_MODEL_NAME=${OLLAMA_MODEL_NAME:-llama3}
+      - REQUEST_TIMEOUT_SECONDS=${REQUEST_TIMEOUT_SECONDS:-5}
     ports:
       - "${MODEL_GATEWAY_GRPC_PORT:-50051}:50051"
 
