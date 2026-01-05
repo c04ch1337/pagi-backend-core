@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -35,12 +36,24 @@ func (s *server) GetPlan(ctx context.Context, in *pb.PlanRequest) (*pb.PlanRespo
 	)
 
 	// Simulate latency
+	start := time.Now()
 	time.Sleep(150 * time.Millisecond)
 
+	// Mock response payload encoded into the existing `plan` string field.
+	// This avoids breaking the proto while still returning `model_type` + `steps`.
+	steps := []string{"initialize context", "fetch tools", "generate final response"}
+	planPayload := map[string]any{
+		"model_type": "MOCK_LLM_V1",
+		"steps":      steps,
+		"prompt":     in.GetPrompt(),
+	}
+	planBytes, _ := json.Marshal(planPayload)
+	latencyMs := time.Since(start).Milliseconds()
+
 	return &pb.PlanResponse{
-		Plan:      fmt.Sprintf("Plan generated for prompt: %s", in.GetPrompt()),
-		ModelName: "pagi-mock-llm-1",
-		LatencyMs: 150,
+		Plan:      string(planBytes),
+		ModelName: "MOCK_LLM_V1",
+		LatencyMs: latencyMs,
 	}, nil
 }
 
