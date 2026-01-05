@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Env
+.env
+
+# Node
+node_modules/
+.next/
+
+# Rust
+**/target/
+
+# Local dev artifacts
+.pids.json
+
+# OS
+.DS_Store
+Thumbs.db
+
