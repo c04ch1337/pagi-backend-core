@@ -6,6 +6,9 @@ services:
     environment:
       - PY_AGENT_PORT=8000
       - GO_BFF_URL=http://pagi-go-bff:${GO_BFF_PORT:-8002}
+      - MODEL_GATEWAY_GRPC_HOST=pagi-go-model-gateway
+      - MODEL_GATEWAY_GRPC_PORT=${MODEL_GATEWAY_GRPC_PORT:-50051}
+      - MODEL_GATEWAY_GRPC_TIMEOUT_SECONDS=5
       - REQUEST_TIMEOUT_SECONDS=${REQUEST_TIMEOUT_SECONDS:-2}
       - LOG_LEVEL=${LOG_LEVEL:-info}
     ports:

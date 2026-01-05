@@ -1,0 +1,11 @@
+syntax = "proto3";
+package modelgateway;
+option go_package = "backend-go-model-gateway/proto;proto";
+
+service ModelGateway {
+  rpc GetPlan (PlanRequest) returns (PlanResponse);
+}
+
+message PlanRequest { string prompt = 1; }
+message PlanResponse { string plan = 1; string model_name = 2; int64 latency_ms = 3; }
+

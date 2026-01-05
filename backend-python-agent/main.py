@@ -4,8 +4,11 @@ import os
 import time
 import json
 import httpx
+import grpc
 from datetime import datetime
 from pydantic import BaseModel
+
+from grpc_client import get_llm_plan
 
 app = FastAPI(title="Python Agent Orchestrator")
 SERVICE_NAME = "backend-python-agent"
@@ -78,14 +81,28 @@ async def create_agent_plan(request: Request, plan_request: PlanRequest):
             "url": f"{GO_BFF_URL}/api/v1/echo",
         }
 
-    # 2. Return plan payload
+    # 2. Call Go Model Gateway (gRPC) to get a plan
+    llm_response = {}
+    try:
+        llm_response = await get_llm_plan(plan_request.prompt)
+    except grpc.aio.AioRpcError as e:
+        llm_response = {
+            "error": "grpc_error",
+            "code": e.code().name if hasattr(e, "code") else "unknown",
+            "details": e.details() if hasattr(e, "details") else str(e),
+        }
+    except Exception as e:
+        llm_response = {"error": e.__class__.__name__, "details": str(e)}
+
+    # 3. Return plan payload
     return {
         "service": SERVICE_NAME,
         "status": "ok",
         "plan": {
-            "steps": ["think", "call-tools", "summarize"],
             "prompt": plan_request.prompt,
+            "llm_plan": llm_response.get("plan"),
         },
+        "llm_response": llm_response,
         "bff_echo": bff_echo_data,
         "request_id": request_id,
     }
