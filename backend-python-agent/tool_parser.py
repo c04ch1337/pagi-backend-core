@@ -46,4 +46,3 @@ def parse_tool_call(llm_plan_json: str) -> Optional[tuple[str, dict]]:
         return None
 
     return name, args
-
