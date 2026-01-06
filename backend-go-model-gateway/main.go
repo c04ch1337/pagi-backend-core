@@ -3,17 +3,22 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	pb "backend-go-model-gateway/proto" // Reference generated code package
+	"backend-go-model-gateway/internal/logger"
+	pb "backend-go-model-gateway/proto/proto" // Reference generated code package
+	"backend-go-model-gateway/service"
 
 	openai "github.com/sashabaranov/go-openai"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 )
 
@@ -21,6 +26,7 @@ import (
 
 // --- Configuration ---
 const DEFAULT_GRPC_PORT = 50051
+const DEFAULT_HTTP_PORT = 8005
 const SERVICE_NAME = "backend-go-model-gateway"
 const VERSION = "1.0.0"
 
@@ -29,6 +35,32 @@ const (
 	defaultOllamaBaseURL     = "http://localhost:11434"
 	defaultRequestTimeoutSec = 5
 )
+
+// sharedHTTPClient is a single, long-lived HTTP client that provides connection
+// pooling and outbound request tracing for all LLM calls.
+//
+// NOTE: request-level timeouts should be enforced via context deadlines.
+var sharedHTTPClient = newSharedHTTPClient()
+
+func newSharedHTTPClient() *http.Client {
+	base := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
+	return &http.Client{
+		Transport: ClientTraceTransport(base),
+	}
+}
 
 type llmProvider string
 
@@ -41,6 +73,28 @@ type llmRuntime struct {
 	Provider llmProvider
 	Model    string
 	Client   *openai.Client
+}
+
+// --- Tool Definitions (for LLM tool-use prompting) ---
+type ToolDefinition struct {
+	Name        string               `json:"name"`
+	Description string               `json:"description"`
+	Parameters  map[string]ToolParam `json:"parameters"`
+}
+
+type ToolParam struct {
+	Type        string `json:"type"`
+	Description string `json:"description"`
+}
+
+var availableTools = []ToolDefinition{
+	{
+		Name:        "web_search",
+		Description: "Use this tool to find up-to-date information or external knowledge.",
+		Parameters: map[string]ToolParam{
+			"query": {Type: "string", Description: "The search query."},
+		},
+	},
 }
 
 func getEnv(key, fallback string) string {
@@ -81,6 +135,7 @@ func initializeLLMClient() (*llmRuntime, error) {
 		model := getEnv("OLLAMA_MODEL_NAME", "llama3")
 		cfg := openai.DefaultConfig("")
 		cfg.BaseURL = ollamaBase
+		cfg.HTTPClient = sharedHTTPClient
 		client := openai.NewClientWithConfig(cfg)
 		return &llmRuntime{Provider: providerOllama, Model: model, Client: client}, nil
 
@@ -92,6 +147,7 @@ func initializeLLMClient() (*llmRuntime, error) {
 		model := getEnv("OPENROUTER_MODEL_NAME", "mistralai/mistral-7b-instruct:free")
 		cfg := openai.DefaultConfig(apiKey)
 		cfg.BaseURL = "https://openrouter.ai/api/v1"
+		cfg.HTTPClient = sharedHTTPClient
 		client := openai.NewClientWithConfig(cfg)
 		return &llmRuntime{Provider: providerOpenRouter, Model: model, Client: client}, nil
 
@@ -104,6 +160,8 @@ func initializeLLMClient() (*llmRuntime, error) {
 type server struct {
 	pb.UnimplementedModelGatewayServer
 	llm *llmRuntime
+	// vectorDB provides Retrieval-Augmented Generation (RAG) context for prompts.
+	vectorDB RAGContextClient
 	// Per-request timeout for the LLM call.
 	requestTimeout time.Duration
 }
@@ -111,6 +169,8 @@ type server struct {
 // GetPlan implements modelgateway.ModelGatewayServer.
 func (s *server) GetPlan(ctx context.Context, in *pb.PlanRequest) (*pb.PlanResponse, error) {
 	requestStart := time.Now()
+
+	ctx = service.ContextWithTraceIDFromIncomingGRPC(ctx)
 
 	// Bound the LLM call.
 	callCtx, cancel := context.WithTimeout(ctx, s.requestTimeout)
@@ -123,22 +183,59 @@ func (s *server) GetPlan(ctx context.Context, in *pb.PlanRequest) (*pb.PlanRespo
 		model = s.llm.Model
 	}
 
-	// Structured JSON logging
-	log.Printf(
-		`{"timestamp": "%s", "level": "info", "service": "%s", "method": "GetPlan", "provider": %q, "model": %q, "prompt": %q}`,
-		time.Now().Format(time.RFC3339Nano), SERVICE_NAME, provider, model, in.GetPrompt(),
-	)
+	lg := logger.NewContextLogger(callCtx)
+	lg.Info("GetPlan", "provider", provider, "model", model, "prompt", in.GetPrompt())
 
 	if s.llm == nil || s.llm.Client == nil {
 		return nil, fmt.Errorf("LLM client not initialized")
 	}
 
-	// Prompt the model to return strict JSON so downstream can parse `model_type` + `steps`.
-	system := "You are a planning assistant. Return STRICT JSON only."
-	user := fmt.Sprintf(
-		"Given this prompt, return a JSON object with keys: model_type (string), steps (array of strings), prompt (string).\nPrompt: %s",
-		in.GetPrompt(),
-	)
+	// --- RAG: Retrieve vector context (best-effort; do not fail the request) ---
+	// Default top-k for retrieval; the mock currently returns 2 deterministic items regardless.
+	const topK = 3
+	retrievalPreamble := ""
+	if s.vectorDB != nil {
+		retrievalStart := time.Now()
+		// Temporary stand-in for a future protobuf field: request all conceptual RAG KBs.
+		kbList := []string{"Domain-KB", "Body-KB", "Soul-KB"}
+		matches, err := s.vectorDB.GetContext(callCtx, VectorQueryRequest{QueryText: in.GetPrompt(), TopK: topK, KnowledgeBases: kbList})
+		if err != nil {
+			lg.Warn("vector_retrieval_failed", "error", err)
+		} else if len(matches) > 0 {
+			var contextBuilder strings.Builder
+			contextBuilder.WriteString("The following information is retrieved from the knowledge base:\n")
+			contextBuilder.WriteString("<context>\n")
+			for _, match := range matches {
+				// Visually separate KBs in the prompt.
+				contextBuilder.WriteString(fmt.Sprintf("**%s**\n", match.KnowledgeBase))
+				contextBuilder.WriteString(fmt.Sprintf("ID: %s\nText: %s\n---\n", match.ID, match.Text))
+			}
+			contextBuilder.WriteString("</context>\n\n")
+			retrievalPreamble = contextBuilder.String()
+
+			lg.Info("vector_retrieval_complete", "match_count", len(matches), "latency_ms", time.Since(retrievalStart).Milliseconds())
+		}
+	}
+
+	// --- Tool schema + strict output instructions ---
+	toolsBlob, _ := json.MarshalIndent(availableTools, "", "  ")
+	toolsSection := fmt.Sprintf("<available_tools>\n%s\n</available_tools>\n\n", string(toolsBlob))
+
+	// Prompt the model to return strict JSON so downstream can parse either a plan or a tool call.
+	system := "" +
+		"You are a planning assistant.\n" +
+		"Return STRICT JSON only (no markdown, no prose, no code fences).\n\n" +
+		"TOOL USE:\n" +
+		"- If a tool is necessary, return a STRICT JSON object containing the key 'tool'.\n" +
+		"- The 'tool' object MUST have keys: 'name' (string) and 'args' (object).\n" +
+		"- Example: {\"tool\":{\"name\":\"web_search\",\"args\":{\"query\":\"...\"}}}\n" +
+		"\n" +
+		"PLANNING (no tool needed):\n" +
+		"- Return a STRICT JSON object containing: 'steps' (array of strings).\n" +
+		"\n" +
+		toolsSection
+
+	user := retrievalPreamble + fmt.Sprintf("User prompt: %s", in.GetPrompt())
 
 	resp, err := s.llm.Client.CreateChatCompletion(
 		callCtx,
@@ -187,19 +284,48 @@ func (s *server) GetPlan(ctx context.Context, in *pb.PlanRequest) (*pb.PlanRespo
 		if !strings.HasPrefix(candidate, "{") {
 			return "", false
 		}
-		var decoded struct {
-			Steps  []string `json:"steps"`
-			Prompt string   `json:"prompt"`
-		}
-		if err := json.Unmarshal([]byte(candidate), &decoded); err != nil {
+
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(candidate), &obj); err != nil {
 			return "", false
 		}
-		if len(decoded.Steps) == 0 {
+
+		// Tool-call path: pass through (but ensure tracing fields exist).
+		if toolObj, ok := obj["tool"].(map[string]any); ok {
+			name, _ := toolObj["name"].(string)
+			if strings.TrimSpace(name) == "" {
+				return "", false
+			}
+			if _, ok := toolObj["args"]; !ok {
+				toolObj["args"] = map[string]any{}
+			}
+			if _, ok := obj["model_type"]; !ok {
+				obj["model_type"] = provider
+			}
+			if _, ok := obj["prompt"]; !ok {
+				obj["prompt"] = in.GetPrompt()
+			}
+			b, _ := json.Marshal(obj)
+			return string(b), true
+		}
+
+		// Planning path: require a non-empty steps array.
+		stepsAny, ok := obj["steps"].([]any)
+		if !ok || len(stepsAny) == 0 {
+			return "", false
+		}
+		steps := make([]string, 0, len(stepsAny))
+		for _, v := range stepsAny {
+			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+				steps = append(steps, s)
+			}
+		}
+		if len(steps) == 0 {
 			return "", false
 		}
 		payload := map[string]any{
 			"model_type": provider,
-			"steps":      decoded.Steps,
+			"steps":      steps,
 			"prompt":     in.GetPrompt(),
 		}
 		b, _ := json.Marshal(payload)
@@ -235,12 +361,50 @@ func (s *server) GetPlan(ctx context.Context, in *pb.PlanRequest) (*pb.PlanRespo
 }
 
 func main() {
+	// --- OpenTelemetry tracing (best-effort) ---
+	if tp, err := InitTracer(context.Background()); err != nil {
+		log.Printf(
+			`{"timestamp":"%s","level":"warn","service":"%s","component":"tracing","error":%q,"message":"failed to initialize OpenTelemetry; continuing without tracing"}`,
+			time.Now().Format(time.RFC3339Nano), SERVICE_NAME, err.Error(),
+		)
+	} else {
+		defer func() { _ = tp.Shutdown(context.Background()) }()
+	}
+
 	// Parse port from environment or flag
 	grpcPortEnv := os.Getenv("MODEL_GATEWAY_GRPC_PORT")
 	port, err := strconv.Atoi(grpcPortEnv)
 	if err != nil || port == 0 {
 		port = DEFAULT_GRPC_PORT
 	}
+
+	// Initialize Vector DB client (mock for now).
+	rigCtx, cancelRAGDial := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelRAGDial()
+	vectorClient, err := NewRAGGRPCClient(rigCtx)
+	if err != nil {
+		log.Fatalf(
+			`{"timestamp":"%s","level":"fatal","service":"%s","component":"RAGGRPCClient","error":%q}`,
+			time.Now().Format(time.RFC3339Nano), SERVICE_NAME, err.Error(),
+		)
+	}
+	defer func() { _ = vectorClient.Close() }()
+
+	// Temporary HTTP endpoint for independent testing of vector retrieval.
+	httpPort := getEnvInt("MODEL_GATEWAY_HTTP_PORT", DEFAULT_HTTP_PORT)
+	go func() {
+		srv := &http.Server{Addr: fmt.Sprintf(":%d", httpPort), Handler: NewHTTPMux(vectorClient)}
+		log.Printf(
+			`{"timestamp":"%s","level":"info","service":"%s","version":"%s","port":%d,"message":"HTTP server listening (temporary vector-test endpoint)."}`,
+			time.Now().Format(time.RFC3339Nano), SERVICE_NAME, VERSION, httpPort,
+		)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf(
+				`{"timestamp":"%s","level":"error","service":"%s","error":"http server failed: %v"}`,
+				time.Now().Format(time.RFC3339Nano), SERVICE_NAME, err,
+			)
+		}
+	}()
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
@@ -260,8 +424,10 @@ func main() {
 
 	timeoutSec := getEnvInt("REQUEST_TIMEOUT_SECONDS", defaultRequestTimeoutSec)
 
-	s := grpc.NewServer()
-	pb.RegisterModelGatewayServer(s, &server{llm: llm, requestTimeout: time.Duration(timeoutSec) * time.Second})
+	s := grpc.NewServer(
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
+	)
+	pb.RegisterModelGatewayServer(s, &server{llm: llm, vectorDB: vectorClient, requestTimeout: time.Duration(timeoutSec) * time.Second})
 
 	log.Printf(
 		`{"timestamp": "%s", "level": "info", "service": "%s", "version": "%s", "port": %d, "provider": %q, "model": %q, "message": "gRPC server listening."}`,

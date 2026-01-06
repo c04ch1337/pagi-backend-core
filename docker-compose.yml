@@ -1,98 +1,114 @@
 services:
-  pagi-python-agent:
-    container_name: pagi-python-agent
-    build:
-      context: ./backend-python-agent
-    environment:
-      - PY_AGENT_PORT=8000
-      - GO_BFF_URL=http://pagi-go-bff:${GO_BFF_PORT:-8002}
-      - MODEL_GATEWAY_GRPC_HOST=pagi-go-model-gateway
-      - MODEL_GATEWAY_GRPC_PORT=${MODEL_GATEWAY_GRPC_PORT:-50051}
-      - MODEL_GATEWAY_GRPC_TIMEOUT_SECONDS=5
-      - REQUEST_TIMEOUT_SECONDS=${REQUEST_TIMEOUT_SECONDS:-2}
-      - LOG_LEVEL=${LOG_LEVEL:-info}
+  redis:
+    image: redis:latest
+    container_name: redis
     ports:
-      - "${PY_AGENT_PORT:-8000}:8000"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/health').read(); sys.exit(0)"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+      - "6379:6379"
 
-  pagi-rust-sandbox:
-    container_name: pagi-rust-sandbox
+  chroma-db:
+    image: ghcr.io/chroma-core/chroma:latest
+    container_name: chroma-db
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/chroma
+    volumes:
+      - chroma_data:/chroma/chroma
+    ports:
+      - "8000:8000"
+
+  memory-service:
+    container_name: memory-service
     build:
-      context: ./backend-rust-sandbox
+      context: .
+      dockerfile: backend-python-memory/Dockerfile
+    environment:
+      - MEMORY_PORT=8003
+      - MEMORY_GRPC_PORT=50052
+      - CHROMA_HOST=chroma-db
+      - CHROMA_PORT=8000
+    ports:
+      - "8003:8003"
+    depends_on:
+      - chroma-db
+
+  rust-sandbox:
+    container_name: rust-sandbox
+    build:
+      context: .
+      dockerfile: backend-rust-sandbox/Dockerfile
     environment:
       - RUST_SANDBOX_PORT=8001
-      - REQUEST_TIMEOUT_SECONDS=${REQUEST_TIMEOUT_SECONDS:-2}
-      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - RUST_SANDBOX_GRPC_PORT=50053
+      - LOG_LEVEL=info
     ports:
-      - "${RUST_SANDBOX_PORT:-8001}:8001"
-    healthcheck:
-      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8001/health >/dev/null 2>&1"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+      - "50053:50053"
 
-  pagi-mock-memory:
-    container_name: pagi-mock-memory
+  model-gateway:
+    container_name: model-gateway
     build:
-      context: ./scripts
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend-go-model-gateway/Dockerfile
     environment:
-      - MEMORY_MOCK_PORT=8003
-      - REQUEST_TIMEOUT_SECONDS=${REQUEST_TIMEOUT_SECONDS:-2}
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-    ports:
-      - "${MEMORY_MOCK_PORT:-8003}:8003"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8003/health').read(); sys.exit(0)"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  pagi-go-bff:
-    container_name: pagi-go-bff
-    build:
-      context: ./backend-go-bff
-    environment:
-      - GO_BFF_PORT=8002
-      - PY_AGENT_URL=http://pagi-python-agent:8000
-      - RUST_SANDBOX_URL=http://pagi-rust-sandbox:8001
-      - MEMORY_URL=http://pagi-mock-memory:8003
-      - REQUEST_TIMEOUT_SECONDS=${REQUEST_TIMEOUT_SECONDS:-2}
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-    ports:
-      - "${GO_BFF_PORT:-8002}:8002"
-    depends_on:
-      pagi-python-agent:
-        condition: service_healthy
-      pagi-rust-sandbox:
-        condition: service_healthy
-      pagi-mock-memory:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8002/health >/dev/null 2>&1"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  pagi-go-model-gateway:
-    container_name: pagi-go-model-gateway
-    build:
-      context: ./backend-go-model-gateway
-    environment:
-      - MODEL_GATEWAY_GRPC_PORT=${MODEL_GATEWAY_GRPC_PORT:-50051}
-      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - MODEL_GATEWAY_GRPC_PORT=50051
+      - RAG_GRPC_ADDR=memory-service:50052
 
       # LLM provider switching
       - LLM_PROVIDER=${LLM_PROVIDER:-openrouter}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - OPENROUTER_MODEL_NAME=${OPENROUTER_MODEL_NAME:-mistralai/mistral-7b-instruct:free}
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://localhost:11434}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
       - OLLAMA_MODEL_NAME=${OLLAMA_MODEL_NAME:-llama3}
       - REQUEST_TIMEOUT_SECONDS=${REQUEST_TIMEOUT_SECONDS:-5}
     ports:
-      - "${MODEL_GATEWAY_GRPC_PORT:-50051}:50051"
+      - "50051:50051"
+    depends_on:
+      - memory-service
+
+  agent-planner:
+    container_name: agent-planner
+    build:
+      context: .
+      dockerfile: backend-go-agent-planner/Dockerfile
+    environment:
+      - AGENT_PLANNER_PORT=8080
+      - MODEL_GATEWAY_ADDR=model-gateway:50051
+      - MEMORY_GRPC_ADDR=memory-service:50052
+      - MEMORY_URL=http://memory-service:8003
+      - RUST_SANDBOX_GRPC_ADDR=rust-sandbox:50053
+      - AGENT_MAX_TURNS=${AGENT_MAX_TURNS:-3}
+      - AGENT_RAG_TOP_K=${AGENT_RAG_TOP_K:-3}
+      - REDIS_ADDR=redis:6379
+      - PAGI_AUDIT_DB_PATH=/audit/pagi_audit.db
+    volumes:
+      - agent_planner_audit:/audit
+    ports:
+      - "8585:8080"
+    depends_on:
+      - redis
+      - memory-service
+      - rust-sandbox
+      - model-gateway
+
+  notification-service:
+    container_name: notification-service
+    build:
+      context: .
+      dockerfile: backend-go-notification-service/Dockerfile
+    environment:
+      - REDIS_ADDR=redis:6379
+    depends_on:
+      - redis
+
+  audit-inspector:
+    image: keinos/sqlite3:latest
+    container_name: audit-inspector
+    volumes:
+      - agent_planner_audit:/audit
+    entrypoint: ["sh", "-c", "tail -f /dev/null"]
+    depends_on:
+      - agent-planner
+
+volumes:
+  chroma_data:
+  agent_planner_audit:
 

@@ -17,6 +17,20 @@ node_modules/
 # Local dev artifacts
 .pids.json
 
+# Datastores / local persistence
+chroma_data/
+*.db
+*.sqlite
+*.sqlite3
+pagi_audit.db
+session_history.db
+
+# Go build artifacts
+*.exe
+*.out
+*.test
+backend-go-agent-planner/backend-go-agent-planner.exe
+
 # OS
 .DS_Store
 Thumbs.db

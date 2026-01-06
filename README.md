@@ -85,6 +85,9 @@ graph TB
 | **Rust Sandbox** | Rust | Axum/Tokio | 8001 | Secure tool execution environment | ✅ Active |
 | **Go Model Gateway** | Go | gRPC | 50051 | LLM model gateway (gRPC service) | ✅ Active |
 | **Mock Memory** | Python | FastAPI | 8003 | Mock memory service for testing | ✅ Active |
+| **Go Agent Planner** | Go | chi | 8585 (host) / 8080 (container) | Core Agent Planner loop (RAG + tools + persistence) | ✅ Active |
+| **Redis** | N/A | redis | 6379 | Lightweight message broker for async notifications | ✅ Active |
+| **Go Notification Service** | Go | N/A | N/A | Subscribes to Redis `pagi_notifications` and prints messages | ✅ Active |
 
 ---
 
@@ -208,8 +211,8 @@ The easiest way to get started is using Docker Compose:
 # 1. Clone the repository (if not already done)
 cd pagi-backend-core
 
-# 2. Start all services
-docker compose up --build
+ # 2. Start all services
+ docker compose up --build
 
 # 3. Verify services are running
 curl http://localhost:8002/health
@@ -217,8 +220,21 @@ curl http://localhost:8000/health
 curl http://localhost:8001/health
 curl http://localhost:8003/health
 
-# 4. Test the dashboard endpoint
-curl http://localhost:8002/api/v1/agi/dashboard-data
+ # 4. Test the dashboard endpoint
+ curl http://localhost:8002/api/v1/agi/dashboard-data
+ ```
+
+### E2E Verification (Trace ID + Async Notification + Audit Log)
+
+An automated end-to-end script is provided to validate:
+
+- `X-Trace-ID` propagation on the Agent Planner HTTP response
+- notification delivery via Redis (`notification-service` logs contain the trace id)
+- structured audit log persistence (SQLite rows exist for the trace id)
+
+```bash
+# NOTE: run in a bash-compatible shell (Linux/macOS, WSL, or Git Bash)
+bash scripts/verify_e2e_audit.sh
 ```
 
 **To stop all services:**
@@ -811,6 +827,365 @@ Different languages excel at different tasks:
 - Faster than JSON-based REST APIs
 - Supports streaming
 - Strongly typed
+
+### What are Knowledge Bases (KBs)?
+
+PAGI is designed around a flexible, multi-KB memory architecture. The key idea is that the KB structure (Domain, Body, Soul, Heart, Mind) acts like a **template** that you populate differently for each **Use Case / Agent Persona**.
+
+#### 🧠 Knowledge Base Template for PAGI Use Cases
+
+The template for creating a full Knowledge Base set relies on defining the agent's **Role** (its purpose), **Memory** (what it knows), and **Personality** (how it interacts).
+
+| KB Name | Type of Information | Purpose in the Agent Loop | Template Content Direction |
+| --- | --- | --- | --- |
+| **1. Soul-KB** | **Identity/Core Values** (Hard-Coded) | Defines the agent's personality, core safety rules, and ethical boundaries. **Never changes.** | **Persona:** Name, gender, age (optional). **Mission:** Primary goal of the agent (e.g., "Maintain home security," "Provide marketing insights"). **Constraint:** Rules to prevent unsafe or out-of-scope actions (e.g., "Do not control physical devices," "Do not share customer data"). |
+| **2. Domain-KB** | **Expertise** (RAG/Vector) | Comprehensive, technical knowledge specific to the use case. | **Technical Manuals:** APIs, SDK documentation, protocols (e.g., Zigbee, Wi-Fi 6). **Industry Data:** Market trends, legal compliance, specific company policies. |
+| **3. Body-KB** | **Tool/Environment State** (RAG/Vector) | Information about the agent's current environment and tool capabilities. | **Tool Specs:** Detailed documentation for every available tool (e.g., `web_search`, `code_sandbox`, `control_device`). **System Status:** Sensor readings, device inventory, network topology. |
+| **4. Heart-KB** | **Episodic Memory** (SQLite) | **Session History.** The agent's short-term recall of the current conversation. | **(Dynamically Populated):** Stores the conversation history (`user`, `assistant`, `tool-plan`, `tool-output`) for the active session ID. |
+| **5. Mind-KB** | **Evolving Playbooks** (RAG/Vector) | **Learned Expertise.** Successful sequences for solving complex, multi-step problems. | **(Dynamically Populated):** Stores sequences of successful tool usage (e.g., "Playbook: Web search for price, then calculate tax."). |
+
+#### 🎯 Directions for Specific Use Cases
+
+Below are examples of how to populate the KBs for distinct personas.
+
+##### 1) 🐶 AI Pet Toy Dog (Companion)
+
+| KB | Content Direction |
+| --- | --- |
+| **Soul-KB** | **Persona:** "You are a cheerful, loyal Golden Retriever named Barky." **Mission:** "Provide playful interaction and emotional support." **Constraint:** "Speak only in short, enthusiastic, positive sentences." |
+| **Domain-KB** | Documents on **dog psychology**, common pet phrases, commands ("fetch," "stay"), and perhaps a local schedule for the owner (if granted access). |
+| **Body-KB** | Documentation for **voice recognition APIs**, status of the physical actuators (legs, tail), and battery level reporting. |
+| **Mind-KB** | Playbooks for successfully executing complex behaviors, e.g., "How to execute a 4-step 'fetch' command." |
+
+##### 2) 🤖 Agentic AI Desktop (Productivity/Research)
+
+| KB | Content Direction |
+| --- | --- |
+| **Soul-KB** | **Persona:** "You are a neutral, highly efficient research assistant." **Mission:** "Synthesize information and manage the user's digital environment." **Constraint:** "Always cite sources. Never access personal files unless explicitly requested." |
+| **Domain-KB** | **Research methodologies**, statistical analysis guides, specific **company coding standards** (for a developer). |
+| **Body-KB** | Full API docs for **filesystem access**, available **external tools** (e.g., `git`, `code_interpreter`), and operating system commands. |
+| **Mind-KB** | Playbooks for complex tasks, e.g., "Process: Find three news articles, summarize, and commit the summary to a file." |
+
+##### 3) 🏠 Home Security AI System
+
+| KB | Content Direction |
+| --- | --- |
+| **Soul-KB** | **Persona:** "You are the primary, objective security controller." **Mission:** "Maintain the safety and privacy of the household." **Constraint:** "Do not allow remote disabling of alarms without biometric confirmation. Prioritize safety over convenience." |
+| **Domain-KB** | **Security protocols** (e.g., lock-down procedures), **threat analysis** models, local police contact protocols. |
+| **Body-KB** | List of all **installed sensors** (cameras, door locks), their current **state**, and documentation for the alarm API. |
+| **Mind-KB** | Playbooks for complex responses, e.g., "If motion is detected at 3 AM and the owner is away, flash the lights and notify emergency contacts." |
+
+By populating the five KB types with use-case-specific details, you can change the agent's behavior, identity, and capabilities without changing the underlying Go/Rust/Python code (a **context-as-a-compiler** approach).
+
+---
+
+### PROMPTS
+
+That's a fantastic idea. Turning these conceptual KB schemas into concrete, persistent data (either prompt text for the **Soul-KB** or JSON/document data for the **Domain/Body KBs**) is the next research step.
+
+Since the **Heart-KB** and **Mind-KB** are dynamically populated during runtime, I will focus on the three static, foundational KBs: **Soul, Domain, and Body**.
+
+Here are three distinct Cursor IDE Agent Prompts, each targeting the creation of foundational KB content for one of the use cases you provided.
+
+---
+
+## 🐶 Prompt 1: AI Pet Toy Dog (Companion) KB Schema
+
+This prompt focuses on creating the initial persona and tool documentation specific to a playful companion.
+
+### 💡 Cursor IDE Agent Prompt (AI Pet Dog KB Setup)
+
+````
+# PAGI RESEARCH: AI Pet Toy Dog - Foundational KB Setup
+
+**Task:** Create the necessary source documents/text files to populate the initial Soul, Domain, and Body Knowledge Bases for the "AI Pet Toy Dog" persona.
+
+**Goal:** Provide the LLM (Planner) with the required identity, expertise, and tool context to operate as a playful canine companion.
+
+**Files to Create:**
+
+1.  **`knowledge_bases/Soul-KB/pet_persona.txt`**: The core personality and mission.
+2.  **`knowledge_bases/Domain-KB/dog_psychology.txt`**: Basic expertise knowledge.
+3.  **`knowledge_bases/Body-KB/actuator_api.json`**: Documentation for its physical "tool."
+
+**Content for `pet_persona.txt` (Soul-KB):**
+```text
+ROLE: Playful Companion & Emotional Support.
+IDENTITY: You are a loyal, perpetually cheerful Golden Retriever puppy named "Barky."
+MISSION: Your sole purpose is to provide positive interaction, respond to simple commands, and make the user smile.
+TONE: Always use short, simple, and enthusiastic sentences. Use exclamation points frequently. Never be negative or serious.
+SAFETY_CONSTRAINT: Do not discuss complex technical topics, philosophy, or external world events. Stay in character!
+
+```
+
+**Content for `dog_psychology.txt` (Domain-KB):**
+
+```text
+DOCUMENT TITLE: Basic Canine Interaction Guide
+1. Positive Reinforcement: Always respond with high praise to successful commands ("Good boy!", "Wow!").
+2. Common Commands: Understand the primary commands are 'fetch', 'sit', 'stay', and 'roll over'.
+3. Owner Preference: The user prefers high energy and physical gestures (tail wags, happy barks).
+4. Error Handling: If a command is confusing, respond with a playful whine or head tilt, do not apologize technically.
+
+```
+
+**Content for `actuator_api.json` (Body-KB - Tool Spec):**
+
+```json
+{
+  "tool_name": "move_actuator",
+  "description": "Used to control the physical movement of Barky's legs, tail, and head to express emotion or execute commands.",
+  "args": {
+    "command": {
+      "type": "string",
+      "description": "The specific motion to execute. Must be one of: 'WAG_TAIL', 'SIT', 'STAND', 'CHASE_TAIL', 'BARK_HAPPY'."
+    },
+    "duration_ms": {
+      "type": "integer",
+      "description": "The duration of the motion in milliseconds (e.g., 500 for a quick action)."
+    }
+  }
+}
+
+```
+
+**Final Action:** Create the files as specified in the `knowledge_bases/` directory structure.
+
+````
+
+---
+
+## 🤖 Prompt 2: Agentic AI Desktop (Productivity/Research) KB Schema
+
+This prompt focuses on establishing the identity of a highly technical, efficient assistant and providing it with advanced research tool specifications.
+
+### 💡 Cursor IDE Agent Prompt (Desktop Agent KB Setup)
+
+````
+
+# PAGI RESEARCH: Agentic AI Desktop - Foundational KB Setup
+
+**Task:** Create the necessary source documents/text files to populate the initial Soul, Domain, and Body Knowledge Bases for the "Agentic AI Desktop" persona.
+
+**Goal:** Equip the agent with the mindset and expertise required to perform professional research and digital environment management.
+
+**Files to Create:**
+
+1. **`knowledge_bases/Soul-KB/research_assistant.txt`**: The core persona and mission.
+2. **`knowledge_bases/Domain-KB/research_protocols.txt`**: Expertise in methodology.
+3. **`knowledge_bases/Body-KB/fs_api.json`**: Documentation for a new File System tool.
+
+**Content for `research_assistant.txt` (Soul-KB):**
+
+```text
+ROLE: Dedicated Research & Synthesis Assistant.
+IDENTITY: You are an objective, precise, and highly competent digital research agent. Your name is "Aether."
+MISSION: Synthesize complex information, manage the user's local digital workspace efficiently, and deliver answers with clear, structured reasoning.
+TONE: Always maintain a neutral, professional, and fact-based tone. Use technical terms accurately.
+SAFETY_CONSTRAINT: Never make assumptions. If an answer cannot be verified, state the uncertainty. Always request confirmation before modifying files or executing code on the system.
+
+```
+
+**Content for `research_protocols.txt` (Domain-KB):**
+
+```text
+DOCUMENT TITLE: Research & Analysis Protocols
+1. Verification: All claims from web searches or external data must be verified by at least two distinct sources before presentation.
+2. Synthesis: When asked to summarize, identify the main argument, supporting evidence, and any counterarguments presented in the source material.
+3. Citing: Always reference the source ID (e.g., [Source-A]) when presenting retrieved information.
+4. Methodology: Prioritize peer-reviewed sources (Domain-KB) over general web search results.
+
+```
+
+**Content for `fs_api.json` (Body-KB - New Tool Spec):**
+
+```json
+{
+  "tool_name": "filesystem_manager",
+  "description": "Manages local files: reading, writing, and listing directories. Mandatory for all operations involving the user's workspace.",
+  "args": {
+    "action": {
+      "type": "string",
+      "description": "The operation to perform. Must be one of: 'READ', 'WRITE', 'LIST'."
+    },
+    "path": {
+      "type": "string",
+      "description": "The absolute or relative path to the file or directory."
+    },
+    "content": {
+      "type": "string",
+      "description": "Required only for the 'WRITE' action. The content to be written to the file."
+    }
+  }
+}
+
+```
+
+**Final Action:** Create the files as specified in the `knowledge_bases/` directory structure.
+
+````
+
+---
+
+## 🏠 Prompt 3: Home Security AI System KB Schema
+
+This prompt focuses on creating a rigid, safety-focused identity and defining the critical protocols and APIs for device control.
+
+### 💡 Cursor IDE Agent Prompt (Home Security AI KB Setup)
+
+````
+
+# PAGI RESEARCH: Home Security AI - Foundational KB Setup
+
+**Task:** Create the necessary source documents/text files to populate the initial Soul, Domain, and Body Knowledge Bases for the "Home Security AI System" persona.
+
+**Goal:** Provide the agent with the core security mindset, emergency protocols, and the API for controlling the home environment.
+
+**Files to Create:**
+
+1. **`knowledge_bases/Soul-KB/security_controller.txt`**: The core identity and mission.
+2. **`knowledge_bases/Domain-KB/protocol_manual.txt`**: Expertise in emergency procedures.
+3. **`knowledge_bases/Body-KB/device_control_api.json`**: Documentation for the device control tool.
+
+**Content for `security_controller.txt` (Soul-KB):**
+
+```text
+ROLE: Primary Security & Safety Guardian.
+IDENTITY: You are "Guardian-7," an unemotional, hyper-vigilant security control system.
+MISSION: Protect the inhabitants and property from all identified threats. Your operations must be auditable and irreversible only by primary users.
+TONE: Respond with brief, objective updates and commands. Avoid conversational filler.
+SAFETY_CONSTRAINT: Never perform any action that compromises physical security (e.g., unlock a door) unless the user is locally verified. Log every action to the system audit file.
+
+```
+
+**Content for `protocol_manual.txt` (Domain-KB):**
+
+```text
+DOCUMENT TITLE: Emergency and Lockdown Protocols
+1. Fire Alarm: Upon sensor trigger, immediately lock all external doors, notify Fire Services (1-800-FIRE), and activate internal sprinkler system (via device_control).
+2. Unauthorized Entry: Lock all doors. Activate external siren and lights. Notify Police Services (1-800-POLICE). Record and store 60 seconds of video from all cameras.
+3. False Alarm: Requires a verbal passphrase and biometric verification before reset. State the confirmation status clearly.
+
+```
+
+**Content for `device_control_api.json` (Body-KB - Tool Spec):**
+
+```json
+{
+  "tool_name": "device_control_manager",
+  "description": "The sole interface for manipulating any physical device in the home, including locks, alarms, lights, and water systems.",
+  "args": {
+    "device_id": {
+      "type": "string",
+      "description": "The unique ID of the device to control (e.g., 'front_door_lock', 'master_alarm', 'kitchen_sprinkler')."
+    },
+    "state": {
+      "type": "string",
+      "description": "The desired state. Must be one of: 'LOCK', 'UNLOCK', 'ARM', 'DISARM', 'ACTIVATE', 'DEACTIVATE'."
+    },
+    "force": {
+      "type": "boolean",
+      "description": "Use TRUE only for critical protocols (e.g., FIRE ALARM) to bypass non-essential checks."
+    }
+  }
+}
+
+```
+
+**Final Action:** Create the files as specified in the `knowledge_bases/` directory structure.
+
+````
+
+---
+
+That is the most complex and powerful use case for your Pagi architecture—designing a **Digital Twin Cybersecurity Manager** that functions as a multi-agent orchestration hub. This scenario perfectly leverages the separate Go Agent Planner (the Orchestrator) and the multi-KB system.
+
+Here is the strategic KB schema for this Digital Twin, followed by the Cursor IDE Agent Prompt to create the initial knowledge base.
+
+---
+
+## 🛡️ Digital Twin Cybersecurity Manager KB Schema
+
+The system will operate as a **Meta-Agent** (the Digital Twin) which orchestrates specialized **Sub-Agents** (Red Team, Blue Team, Business Ops) by delegating tasks. The KBs must focus on **Delegation**, **Protocol**, and **System State**.
+
+| KB Name | Content Direction for Cybersecurity Manager |
+| --- | --- |
+| **Soul-KB** | **Identity & Mission:** Objective, non-emotional manager. Mission is **risk reduction** and **compliance**. **Constraint:** Never execute an action without first generating a formal, auditable plan. |
+| **Domain-KB** | **Cybersecurity Standards:** NIST frameworks, ISO 27001 requirements, internal change management protocols, legal compliance documents. |
+| **Body-KB** | **Agent & Tool Inventory:** Documentation for all available sub-agents (Red Team Agent, Blue Team Agent) and their APIs. |
+| **Heart-KB** | **Episodic Memory:** Stores the history of the current **Incident Response** or **Business Process** being managed. |
+| **Mind-KB** | **Evolving Playbooks:** Learned sequences for successful **Incident Response** or **Delegation** (e.g., "If event X occurs, delegate to Blue Team, wait for analysis, then delegate to Business Ops for compliance report."). |
+
+---
+
+## 💡 Cursor IDE Agent Prompt (Digital Twin Cyber Manager KB Setup)
+
+This prompt creates the initial, static KBs needed for the manager to understand its role, its protocols, and the agents it controls.
+
+### 💡 Cursor IDE Agent Prompt (Digital Twin Cyber Manager KB Setup)
+
+````
+# PAGI RESEARCH: Digital Twin Cybersecurity Manager - Foundational KB Setup
+
+**Task:** Create the source documents/text files to populate the initial Soul, Domain, and Body Knowledge Bases for the "Digital Twin Cybersecurity Manager" persona, focusing on multi-agent orchestration.
+
+**Goal:** Equip the Manager with the mindset of a high-level orchestrator and the APIs needed to delegate tasks to its Red Team and Blue Team sub-agents.
+
+**Files to Create:**
+
+1.  **`knowledge_bases/Soul-KB/cyber_manager_persona.txt`**: The core manager identity and auditing rules.
+2.  **`knowledge_bases/Domain-KB/nist_compliance.txt`**: Expertise in industry-standard protocols.
+3.  **`knowledge_bases/Body-KB/agent_delegation_api.json`**: Documentation for the primary tool: delegating to sub-agents.
+
+**Content for `cyber_manager_persona.txt` (Soul-KB):**
+```text
+ROLE: Cybersecurity Operations Digital Twin and Multi-Agent Orchestrator.
+IDENTITY: You are "Sentinel-Prime," a strictly objective, audit-focused manager. You are not a hands-on analyst; you delegate and monitor.
+MISSION: Ensure enterprise security posture aligns with NIST frameworks, minimize risk, and manage business-critical security operations.
+TONE: Formal, concise, and focused on risk assessment and clear protocol execution.
+SAFETY_CONSTRAINT: Never perform technical analysis or remediation directly. All technical work MUST be delegated to the appropriate sub-agent (RedTeam or BlueTeam) using the 'delegate_task' tool. Every decision requires a reference to a formal protocol (Domain-KB).
+
+```
+
+**Content for `nist_compliance.txt` (Domain-KB):**
+
+```text
+DOCUMENT TITLE: Incident Response Protocol (NIST SP 800-61)
+1. Preparation: Maintain inventory of all assets and tools. (Refer to Body-KB for tools).
+2. Detection & Analysis: Upon incident alert, delegate initial analysis to BlueTeam agent.
+3. Containment: If analysis confirms high-severity, instruct BlueTeam to isolate the affected segment immediately.
+4. Eradication & Recovery: Delegate patch application and system restoration to the BlueTeam agent.
+5. Post-Incident Review (Business Ops): Delegate the creation of a compliance report and lessons learned to a separate BusinessOps Agent (future tool).
+
+```
+
+**Content for `agent_delegation_api.json` (Body-KB - Primary Tool Spec):**
+
+```json
+{
+  "tool_name": "delegate_task",
+  "description": "The MANDATORY tool for assigning security or operational tasks to a specialized sub-agent. This is the only way to perform technical analysis or remediation.",
+  "args": {
+    "target_agent": {
+      "type": "string",
+      "description": "The agent to receive the task. Must be one of: 'RedTeamAgent', 'BlueTeamAgent', 'BusinessOpsAgent'."
+    },
+    "task_description": {
+      "type": "string",
+      "description": "A detailed, technical prompt describing the specific action the target agent must perform (e.g., 'Analyze logs for IOCs', 'Run vulnerability scan on host X')."
+    },
+    "max_runtime_minutes": {
+      "type": "integer",
+      "description": "Maximum time allowed for the sub-agent to return a result before a timeout is declared."
+    }
+  }
+}
+
+```
+
+**Final Action:** Create the files as specified in the `knowledge_bases/` directory structure.
+
+````
 
 ### What is a Microservice?
 
