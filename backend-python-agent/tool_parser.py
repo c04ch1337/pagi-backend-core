@@ -7,7 +7,17 @@ from typing import Optional
 def parse_tool_call(llm_plan_json: str) -> Optional[tuple[str, dict]]:
     """Parse a tool call from the LLM plan JSON string.
 
-    Expected format inside the JSON:
+    Supports BOTH formats for compatibility:
+    
+    Format 1 (Go Agent Planner / Model Gateway):
+      {
+        "tool": {
+          "name": "tool_name",
+          "args": {"arg1": "value"}
+        }
+      }
+
+    Format 2 (Legacy Python Agent):
       {
         "tool_call": {
           "name": "tool_name",
@@ -30,19 +40,28 @@ def parse_tool_call(llm_plan_json: str) -> Optional[tuple[str, dict]]:
     if not isinstance(data, dict):
         return None
 
+    # Try Format 1: {"tool": {"name": ..., "args": ...}} (Go Agent Planner)
+    tool_obj = data.get("tool")
+    if isinstance(tool_obj, dict):
+        name = tool_obj.get("name")
+        args = tool_obj.get("args")
+        
+        if isinstance(name, str) and name.strip():
+            if args is None:
+                args = {}
+            if isinstance(args, dict):
+                return name.strip(), args
+
+    # Try Format 2: {"tool_call": {"name": ..., "arguments": ...}} (Legacy)
     tool_call = data.get("tool_call")
-    if not isinstance(tool_call, dict):
-        return None
+    if isinstance(tool_call, dict):
+        name = tool_call.get("name")
+        args = tool_call.get("arguments")
 
-    name = tool_call.get("name")
-    args = tool_call.get("arguments")
+        if isinstance(name, str) and name.strip():
+            if args is None:
+                args = {}
+            if isinstance(args, dict):
+                return name.strip(), args
 
-    if not isinstance(name, str) or not name:
-        return None
-
-    if args is None:
-        args = {}
-    if not isinstance(args, dict):
-        return None
-
-    return name, args
+    return None

@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from opentelemetry import trace
@@ -17,6 +17,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 from memory_service import (
+    check_health,
     get_mock_session_history,
     start_grpc_server_background,
     store_mind_playbook,
@@ -65,6 +66,9 @@ class StorePlaybookPayload(BaseModel):
 
 @app.get("/health")
 def health_check():
+    ok, msg = check_health()
+    if not ok:
+        raise HTTPException(status_code=503, detail=msg)
     return {"service": SERVICE_NAME, "status": "ok", "version": VERSION}
 
 

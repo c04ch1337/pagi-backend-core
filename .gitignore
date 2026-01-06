@@ -17,6 +17,9 @@ node_modules/
 # Local dev artifacts
 .pids.json
 
+# TLS certs (local research/testing)
+tls_certs/
+
 # Datastores / local persistence
 chroma_data/
 *.db

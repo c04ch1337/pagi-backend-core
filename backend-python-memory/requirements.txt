@@ -4,8 +4,11 @@ pydantic
 
 chromadb
 
+sentence-transformers
+
 grpcio
 grpcio-tools
+grpcio-health-checking
 
 opentelemetry-api
 opentelemetry-sdk

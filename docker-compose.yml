@@ -5,6 +5,24 @@ services:
     ports:
       - "6379:6379"
 
+  jaeger:
+    image: jaegertracing/all-in-one:1.58
+    container_name: jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686" # Jaeger UI
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: prometheus
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
   chroma-db:
     image: ghcr.io/chroma-core/chroma:latest
     container_name: chroma-db
@@ -52,6 +70,11 @@ services:
       - MODEL_GATEWAY_GRPC_PORT=50051
       - RAG_GRPC_ADDR=memory-service:50052
 
+      # mTLS for gRPC (server-side)
+      - TLS_SERVER_CERT_PATH=/app/tls_certs/server.crt
+      - TLS_SERVER_KEY_PATH=/app/tls_certs/server.key
+      - TLS_CA_CERT_PATH=/app/tls_certs/ca.crt
+
       # LLM provider switching
       - LLM_PROVIDER=${LLM_PROVIDER:-openrouter}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
@@ -61,6 +84,8 @@ services:
       - REQUEST_TIMEOUT_SECONDS=${REQUEST_TIMEOUT_SECONDS:-5}
     ports:
       - "50051:50051"
+    volumes:
+      - ./tls_certs:/app/tls_certs:ro
     depends_on:
       - memory-service
 
@@ -79,8 +104,21 @@ services:
       - AGENT_RAG_TOP_K=${AGENT_RAG_TOP_K:-3}
       - REDIS_ADDR=redis:6379
       - PAGI_AUDIT_DB_PATH=/audit/pagi_audit.db
+      # SECURITY: API Key authentication (REQUIRED for production)
+      # Generate with: openssl rand -hex 32
+      - PAGI_API_KEY=${PAGI_API_KEY:-}
+
+      # OpenTelemetry
+      - OTEL_SERVICE_NAME=agent-planner
+      - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
+
+      # mTLS for gRPC (client-side to model-gateway)
+      - TLS_CLIENT_CERT_PATH=/app/tls_certs/client.crt
+      - TLS_CLIENT_KEY_PATH=/app/tls_certs/client.key
+      - TLS_CA_CERT_PATH=/app/tls_certs/ca.crt
     volumes:
       - agent_planner_audit:/audit
+      - ./tls_certs:/app/tls_certs:ro
     ports:
       - "8585:8080"
     depends_on:
@@ -88,6 +126,7 @@ services:
       - memory-service
       - rust-sandbox
       - model-gateway
+      - jaeger
 
   notification-service:
     container_name: notification-service

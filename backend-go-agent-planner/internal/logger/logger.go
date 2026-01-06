@@ -29,3 +29,19 @@ func Fatalf(logger *slog.Logger, msg string, args ...any) {
 	logger.Error(msg, args...)
 	os.Exit(1)
 }
+
+// LogCircuitBreakerStateChange logs a structured event whenever a circuit breaker
+// transitions between states.
+//
+// Typical transitions: closed -> open, open -> half-open, half-open -> closed.
+func LogCircuitBreakerStateChange(logger *slog.Logger, breakerName string, fromState string, toState string) {
+	if logger == nil {
+		logger = defaultLogger
+	}
+	logger.Warn(
+		"circuit_breaker_state_change",
+		"breaker", breakerName,
+		"from", fromState,
+		"to", toState,
+	)
+}

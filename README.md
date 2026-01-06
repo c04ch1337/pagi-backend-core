@@ -1,10 +1,10 @@
-# 🚀 Polygon AGI Backend - Comprehensive Guide
+# Polygon AGI Backend (PAGI) - Comprehensive Guide
 
-> **A polyglot microservices architecture** designed for fast iteration on an "agent + tools + gateway + BFF" backend system.
+> **A polyglot microservices architecture** designed for fast iteration on an **agent + tools + gateway + memory** backend system.
 
 ---
 
-## 📋 Table of Contents
+## Table of Contents
 
 1. [Overview](#overview)
 2. [Architecture Diagram](#architecture-diagram)
@@ -19,81 +19,159 @@
 
 ---
 
-## 🎯 Overview
+## Overview
 
 This backend system is built using **multiple programming languages** (polyglot architecture) to leverage the strengths of each language:
 
-- **Go** for high-performance API gateways and BFF (Backend for Frontend)
-- **Python** for AI/ML agent logic and rapid prototyping
+- **Go** for high-performance HTTP services and gRPC gateways
+- **Python** for memory services and rapid prototyping
 - **Rust** for secure, sandboxed tool execution
 - **gRPC** for efficient inter-service communication
 
 The system follows a **microservices architecture** where each service has a specific responsibility and communicates with others through well-defined APIs.
 
+### Runtime profiles
+
+This repo supports two runnable “profiles”:
+
+1. **Docker Compose (recommended / current core stack)**
+   - Runs the Go **Agent Planner** + Go **Model Gateway** + Python **Memory Service** (+ Chroma, Redis, observability)
+2. **Bare-metal dev harness (legacy demo stack)**
+   - Runs the Go **BFF** + Python **Agent** + Rust **Sandbox** + a **Mock Memory** + Go **Model Gateway** via [`scripts/run_all_dev.py`](scripts/run_all_dev.py:1)
+
 ---
 
-## 🏗️ Architecture Diagram
+## Architecture Diagram
+
+### Docker Compose profile (Agent Planner stack)
+
+```mermaid
+graph TB
+    subgraph "Client"
+        C[Client / UI]
+    end
+
+    subgraph "HTTP"
+        AP[Go Agent Planner<br/>HTTP :8585]
+    end
+
+    subgraph "gRPC"
+        MG[Go Model Gateway<br/>gRPC :50051]
+        MS[Python Memory Service<br/>HTTP :8003 + gRPC :50052]
+        RS[Rust Sandbox<br/>gRPC :50053]
+    end
+
+    subgraph "Infra"
+        R[Redis :6379]
+        CH[Chroma :8000]
+        J[Jaeger :16686]
+        P[Prometheus :9090]
+    end
+
+    C -->|HTTP| AP
+    AP -->|gRPC| MG
+    AP -->|gRPC| MS
+    AP -->|gRPC| RS
+    MS -->|HTTP| CH
+    AP -->|pub/sub| R
+
+    style AP fill:#00ADD8,stroke:#007A9B,stroke-width:2px,color:#fff
+    style MG fill:#00ADD8,stroke:#007A9B,stroke-width:2px,color:#fff
+    style MS fill:#3776AB,stroke:#1F4788,stroke-width:2px,color:#fff
+    style RS fill:#CE412B,stroke:#8B2E1F,stroke-width:2px,color:#fff
+```
+
+### Bare-metal dev harness profile (BFF + Python Agent demo)
+
+> This is the older “fan-out BFF” demo stack started by [`make run-dev`](Makefile:1) / [`scripts/run_all_dev.py`](scripts/run_all_dev.py:1).
 
 ```mermaid
 graph TB
     subgraph "Client Layer"
         FE[Frontend Application<br/>Next.js]
     end
-    
+
     subgraph "API Gateway Layer"
-        BFF[Go BFF Service<br/>Port 8002<br/>Gin Framework]
+        BFF[Go BFF Service<br/>HTTP :8002<br/>Gin]
     end
-    
+
     subgraph "Core Services"
-        PY[Python Agent<br/>Port 8000<br/>FastAPI]
-        RS[Rust Sandbox<br/>Port 8001<br/>Axum/Tokio]
-        MM[Mock Memory<br/>Port 8003<br/>FastAPI]
+        PY[Python Agent<br/>HTTP :8000<br/>FastAPI]
+        RS2[Rust Sandbox<br/>HTTP :8001<br/>Axum/Tokio]
+        MM[Mock Memory<br/>HTTP :8003<br/>FastAPI]
     end
-    
+
     subgraph "Model Gateway"
-        MG[Go Model Gateway<br/>Port 50051<br/>gRPC]
+        MG2[Go Model Gateway<br/>gRPC :50051]
     end
-    
-    FE -->|HTTP REST| BFF
-    BFF -->|HTTP POST<br/>Concurrent| PY
-    BFF -->|HTTP POST<br/>Concurrent| RS
-    BFF -->|HTTP GET<br/>Concurrent| MM
-    PY -->|gRPC| MG
-    PY -->|HTTP POST<br/>Echo Check| BFF
-    
-    style FE fill:#4A90E2,stroke:#2E5C8A,stroke-width:2px,color:#fff
+
+    FE -->|HTTP| BFF
+    BFF -->|HTTP POST| PY
+    BFF -->|HTTP POST| RS2
+    BFF -->|HTTP GET| MM
+    PY -->|gRPC| MG2
+
     style BFF fill:#00ADD8,stroke:#007A9B,stroke-width:2px,color:#fff
     style PY fill:#3776AB,stroke:#1F4788,stroke-width:2px,color:#fff
-    style RS fill:#CE412B,stroke:#8B2E1F,stroke-width:2px,color:#fff
-    style MM fill:#3776AB,stroke:#1F4788,stroke-width:2px,color:#fff
-    style MG fill:#00ADD8,stroke:#007A9B,stroke-width:2px,color:#fff
+    style RS2 fill:#CE412B,stroke:#8B2E1F,stroke-width:2px,color:#fff
+    style MG2 fill:#00ADD8,stroke:#007A9B,stroke-width:2px,color:#fff
 ```
 
-**Legend:**
-- 🔵 **Blue**: Go services (high performance)
-- 🟦 **Dark Blue**: Python services (AI/ML logic)
-- 🔴 **Red**: Rust service (secure execution)
+---
+
+## Services Overview
+
+### Docker Compose profile services
+
+| Service | Language | Framework | Ports | Purpose |
+|---------|----------|-----------|-------|---------|
+| **Go Agent Planner** | Go | chi | 8585 (host) / 8080 (container) | Primary HTTP entrypoint: agent loop (RAG + tools + audit + notifications) |
+| **Go Model Gateway** | Go | gRPC | 50051 (host + container) | LLM model gateway (gRPC service) |
+| **Memory Service** | Python | FastAPI | 8003 (HTTP host) + 50052 (gRPC internal) | Session history + RAG context (backed by Chroma) |
+| **Rust Sandbox** | Rust | Axum + gRPC | 50053 (gRPC host) + 8001 (HTTP internal) | Secure tool execution |
+| **Chroma DB** | N/A | chroma | 8000 | Vector store backend for RAG |
+| **Redis** | N/A | redis | 6379 | Async notifications channel |
+| **Notification Service** | Go | N/A | N/A | Subscribes to Redis `pagi_notifications` and prints messages |
+| **Jaeger** | N/A | jaeger | 16686 / 4317 / 4318 | Distributed tracing |
+| **Prometheus** | N/A | prometheus | 9090 | Metrics scraping |
+
+### Bare-metal dev harness services
+
+| Service | Language | Framework | Port | Purpose |
+|---------|----------|-----------|------|---------|
+| **Go BFF** | Go | Gin | 8002 | Fan-out aggregator for demo UI |
+| **Python Agent** | Python | FastAPI | 8000 | Demo agent planning (calls model gateway) |
+| **Rust Sandbox** | Rust | Axum/Tokio | 8001 | Demo HTTP tool execution |
+| **Mock Memory** | Python | FastAPI | 8003 | Mock memory service for local dev demo |
+| **Go Model Gateway** | Go | gRPC | 50051 | LLM model gateway (gRPC service) |
 
 ---
 
-## 📦 Services Overview
+## Request Flow
 
-| Service | Language | Framework | Port | Purpose | Status |
-|---------|----------|-----------|------|---------|--------|
-| **Go BFF** | Go | Gin | 8002 | Backend for Frontend - aggregates data from all services | ✅ Active |
-| **Python Agent** | Python | FastAPI | 8000 | Agent planning & orchestration, calls model gateway | ✅ Active |
-| **Rust Sandbox** | Rust | Axum/Tokio | 8001 | Secure tool execution environment | ✅ Active |
-| **Go Model Gateway** | Go | gRPC | 50051 | LLM model gateway (gRPC service) | ✅ Active |
-| **Mock Memory** | Python | FastAPI | 8003 | Mock memory service for testing | ✅ Active |
-| **Go Agent Planner** | Go | chi | 8585 (host) / 8080 (container) | Core Agent Planner loop (RAG + tools + persistence) | ✅ Active |
-| **Redis** | N/A | redis | 6379 | Lightweight message broker for async notifications | ✅ Active |
-| **Go Notification Service** | Go | N/A | N/A | Subscribes to Redis `pagi_notifications` and prints messages | ✅ Active |
+### Agent Planner request flow (Docker Compose profile)
 
----
+```mermaid
+sequenceDiagram
+    participant Client
+    participant AP as Agent Planner<br/>(:8585)
+    participant MS as Memory Service<br/>(gRPC :50052)
+    participant MG as Model Gateway<br/>(gRPC :50051)
+    participant RS as Rust Sandbox<br/>(gRPC :50053)
+    participant Redis as Redis<br/>(:6379)
 
-## 🔄 Request Flow Diagram
+    Client->>AP: POST /plan {prompt, session_id}
+    activate AP
+    AP->>MS: GetSessionHistory(session_id)
+    AP->>MS: GetRAGContext(prompt)
+    AP->>MG: GetPlan(planner_input, resources)
+    AP->>RS: ExecuteTool(tool_call)
+    AP->>Redis: Publish notification (async)
+    AP-->>Client: {result}
+    deactivate AP
+```
 
-### Main Dashboard Request Flow
+### Main Dashboard request flow (Bare-metal dev harness)
 
 ```mermaid
 sequenceDiagram
@@ -141,7 +219,7 @@ sequenceDiagram
 
 ---
 
-## 🛠️ Technology Stack
+## Technology Stack
 
 ```mermaid
 graph LR
@@ -191,7 +269,7 @@ graph LR
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
@@ -203,26 +281,39 @@ Before you begin, ensure you have the following installed:
 - **Docker** and **Docker Compose** (for containerized deployment)
 - **Make** (optional, for convenience commands)
 
-### Quick Start (Docker - Recommended for Beginners)
+### Quick Start (Docker Compose - Recommended)
 
-The easiest way to get started is using Docker Compose:
+This is the **current core stack** (Agent Planner + Model Gateway + Memory Service + Sandbox + infra) as defined in [`docker-compose.yml`](docker-compose.yml:1).
 
 ```bash
-# 1. Clone the repository (if not already done)
-cd pagi-backend-core
+# 0. (Optional) copy env template
+# Linux/macOS/WSL/Git Bash:
+#   cp .env.example .env
+# Windows (cmd.exe):
+#   copy .env.example .env
 
- # 2. Start all services
- docker compose up --build
+# Example (bash):
+cp .env.example .env
 
-# 3. Verify services are running
-curl http://localhost:8002/health
-curl http://localhost:8000/health
-curl http://localhost:8001/health
+# 1. (Recommended): generate local mTLS certs for internal gRPC
+# NOTE: run in a bash-compatible shell (Linux/macOS, WSL, or Git Bash)
+bash scripts/gen_certs.sh
+
+# 2. Configure your LLM provider credentials.
+# Recommended: put them into your .env file (used by docker compose), e.g.:
+#   OPENROUTER_API_KEY=...
+#   OPENROUTER_MODEL_NAME=mistralai/mistral-7b-instruct:free
+
+# 3. Start everything
+docker compose up --build
+
+# 4. Verify core endpoints
+curl http://localhost:8585/health
 curl http://localhost:8003/health
 
- # 4. Test the dashboard endpoint
- curl http://localhost:8002/api/v1/agi/dashboard-data
- ```
+# 5. Run a plan (Agent Planner)
+curl -X POST http://localhost:8585/plan -H "Content-Type: application/json" -d "{\"prompt\":\"Say hello and summarize system status\",\"session_id\":\"demo\",\"resources\":[] }"
+```
 
 ### E2E Verification (Trace ID + Async Notification + Audit Log)
 
@@ -242,7 +333,7 @@ bash scripts/verify_e2e_audit.sh
 docker compose down
 ```
 
-### Development Setup (Bare Metal)
+### Development Setup (Bare Metal / Dev Harness)
 
 For local development without Docker:
 
@@ -295,7 +386,7 @@ go generate ./...
 #### Step 3: Run All Services
 
 ```bash
-# Start all services in development mode
+# Start the legacy demo stack (BFF + Python Agent + Rust Sandbox + Mock Memory + Model Gateway)
 make run-dev
 
 # Or manually run each service in separate terminals:
@@ -499,9 +590,26 @@ graph LR
 
 ---
 
-## 📡 API Endpoints
+## API Endpoints
 
-### Go BFF (Port 8002)
+### Go Agent Planner (Docker Compose profile; host port 8585)
+
+| Method | Endpoint | Description | Auth |
+|--------|----------|-------------|------|
+| `GET` | `/health` | Health check | none |
+| `GET` | `/metrics` | Prometheus metrics | none |
+| `POST` | `/plan` | Run the agent loop | optional `X-API-Key` |
+| `POST` | `/run` | Alias for `/plan` | optional `X-API-Key` |
+
+**Example request:**
+
+```bash
+curl -X POST http://localhost:8585/plan -H "Content-Type: application/json" -H "X-Trace-ID: test-trace-123" -d "{\"prompt\":\"Generate a 3-step plan\",\"session_id\":\"s1\",\"resources\":[] }"
+```
+
+> **Auth note:** If `PAGI_API_KEY` is set (see [`.env.example`](.env.example:1)), requests require `X-API-Key: <key>` (or `Authorization: Bearer <key>`). If not set, auth is **disabled** (dev mode).
+
+### Go BFF (Bare-metal dev harness; port 8002)
 
 | Method | Endpoint | Description | Request Body | Response |
 |--------|----------|-------------|--------------|----------|
@@ -565,7 +673,7 @@ curl -X POST http://localhost:8001/api/v1/execute_tool \
 
 ---
 
-### Mock Memory (Port 8003)
+### Mock Memory (Bare-metal dev harness; port 8003)
 
 | Method | Endpoint | Description | Request Body | Response |
 |--------|----------|-------------|--------------|----------|
@@ -574,45 +682,34 @@ curl -X POST http://localhost:8001/api/v1/execute_tool \
 
 ---
 
-## 💻 Development Guide
+## Development Guide
 
 ### Project Structure
 
 ```
 pagi-backend-core/
-├── backend-go-bff/          # Go BFF service
-│   ├── main.go
-│   ├── go.mod
-│   └── Dockerfile
-├── backend-python-agent/    # Python agent service
-│   ├── main.py
-│   ├── grpc_client.py
-│   ├── requirements.txt
-│   ├── proto/
-│   └── Dockerfile
-├── backend-rust-sandbox/    # Rust sandbox service
-│   ├── src/main.rs
-│   ├── Cargo.toml
-│   └── Dockerfile
-├── backend-go-model-gateway/ # Go gRPC model gateway
-│   ├── main.go
-│   ├── proto/
-│   ├── go.mod
-│   └── Dockerfile
-├── scripts/                 # Utility scripts
-│   ├── run_all_dev.py
-│   └── mock_memory_service.py
-├── docker-compose.yml       # Docker orchestration
-├── Makefile                 # Convenience commands
-└── README.md               # This file
+├── backend-go-agent-planner/   # Agent Planner (primary HTTP entrypoint)
+├── backend-go-bff/             # Go BFF service (bare-metal demo)
+├── backend-go-model-gateway/   # Go gRPC model gateway
+├── backend-go-notification-service/
+├── backend-python-agent/       # Python agent service (bare-metal demo)
+├── backend-python-memory/      # Memory Service (HTTP + gRPC)
+├── backend-rust-sandbox/       # Rust sandbox service
+├── docs/
+├── knowledge_bases/
+├── observability/
+├── scripts/                    # Utility scripts (includes bare-metal dev harness)
+├── docker-compose.yml          # Docker orchestration
+├── Makefile                    # Convenience commands
+└── README.md                   # This file
 ```
 
 ### Environment Variables
 
-Create a `.env` file (optional, defaults exist):
+Create a `.env` file (optional; defaults exist). Start with [`.env.example`](.env.example:1).
 
 ```bash
-# Service Ports
+# Service Ports (bare-metal harness)
 PY_AGENT_PORT=8000
 RUST_SANDBOX_PORT=8001
 GO_BFF_PORT=8002
@@ -632,7 +729,38 @@ MODEL_GATEWAY_GRPC_TIMEOUT_SECONDS=5
 
 # Logging
 LOG_LEVEL=info
+
+# SECURITY (Agent Planner)
+# If set, Agent Planner requires X-API-Key (or Authorization: Bearer)
+PAGI_API_KEY=
 ```
+
+### mTLS for internal gRPC (research/testing)
+
+The Go **Agent Planner** ↔ Go **Model Gateway** gRPC connection supports **mutual TLS (mTLS)**.
+
+For Docker Compose, [`docker-compose.yml`](docker-compose.yml:1) mounts `./tls_certs` into both containers at `/app/tls_certs`.
+
+Generate test certs (self-signed) with [`scripts/gen_certs.sh`](scripts/gen_certs.sh:1):
+
+```bash
+# NOTE: run in a bash-compatible shell (Linux/macOS, WSL, or Git Bash)
+bash scripts/gen_certs.sh
+```
+
+Environment variables used:
+
+- **Model Gateway (server-side)**
+  - `TLS_SERVER_CERT_PATH=/app/tls_certs/server.crt`
+  - `TLS_SERVER_KEY_PATH=/app/tls_certs/server.key`
+  - `TLS_CA_CERT_PATH=/app/tls_certs/ca.crt`
+
+- **Agent Planner (client-side)**
+  - `TLS_CLIENT_CERT_PATH=/app/tls_certs/client.crt`
+  - `TLS_CLIENT_KEY_PATH=/app/tls_certs/client.key`
+  - `TLS_CA_CERT_PATH=/app/tls_certs/ca.crt`
+
+Bare-metal runs will stay **insecure by default** unless the `TLS_*` variables are set.
 
 ### Adding a New Service
 
@@ -668,12 +796,14 @@ LOG_LEVEL=info
 ### Debugging Tips
 
 1. **Check service logs:**
-   ```bash
-   # Docker
-   docker compose logs -f pagi-python-agent
-   
-   # Bare metal - logs are printed to stdout
-   ```
+    ```bash
+    # Docker Compose
+    docker compose logs -f agent-planner
+    docker compose logs -f model-gateway
+    docker compose logs -f memory-service
+    
+    # Bare metal - logs are printed to stdout
+    ```
 
 2. **Test individual services:**
    ```bash
@@ -743,7 +873,7 @@ go generate ./...
 **Problem:** Services can't communicate in Docker.
 
 **Solution:**
-- Services in Docker Compose use service names (e.g., `pagi-python-agent:8000`)
+- Services in Docker Compose use service names (e.g., `model-gateway:50051`, `memory-service:50052`)
 - Ensure service names match in `docker-compose.yml`
 - Check `depends_on` and `healthcheck` configurations
 
@@ -832,6 +962,81 @@ Different languages excel at different tasks:
 
 PAGI is designed around a flexible, multi-KB memory architecture. The key idea is that the KB structure (Domain, Body, Soul, Heart, Mind) acts like a **template** that you populate differently for each **Use Case / Agent Persona**.
 
+#### Stubbing a new Use Case (how to “plug in” a new persona)
+
+At a high level, a “use case” in this backend is just:
+
+1) **A persona + constraints** (Soul-KB)
+
+2) **Some domain documents** (Domain-KB)
+
+3) **A tool/environment contract** (Body-KB)
+
+4) A **session_id** to keep episodic history isolated (Heart-KB)
+
+5) Optionally, accumulated playbooks (Mind-KB)
+
+Today, the Agent Planner stack expects the KBs to live in Chroma collections named `Domain-KB`, `Body-KB`, and `Soul-KB` (see `RAG_KNOWLEDGE_BASES` in [`backend-python-memory/memory_service.py`](backend-python-memory/memory_service.py:22)). The quickest way to stub a brand-new use case is:
+
+**Step A — Write your KB content as files (recommended source-of-truth)**
+
+- Put persona text under [`knowledge_bases/Soul-KB/`](knowledge_bases/Soul-KB/:1)
+- Put domain docs under [`knowledge_bases/Domain-KB/`](knowledge_bases/Domain-KB/:1)
+- Put tool specs / environment docs under [`knowledge_bases/Body-KB/`](knowledge_bases/Body-KB/:1)
+
+**Step B — Ingest those documents into Chroma**
+
+The memory service does **not** automatically ingest files yet; it only seeds each collection with a placeholder record at startup (see [`seed_rag_collections()`](backend-python-memory/memory_service.py:148)). For now, ingest via a small one-off script (run it anywhere you can reach Chroma):
+
+```python
+import os
+from pathlib import Path
+
+import chromadb
+from sentence_transformers import SentenceTransformer
+
+CHROMA_HOST = os.environ.get("CHROMA_HOST", "localhost")
+CHROMA_PORT = int(os.environ.get("CHROMA_PORT", "8000"))
+
+client = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
+embed_model = SentenceTransformer(os.environ.get("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2"))
+
+def embed(texts):
+    return embed_model.encode(texts, convert_to_numpy=True).tolist()
+
+def ingest_dir(collection_name: str, dir_path: str):
+    col = client.get_or_create_collection(name=collection_name)
+    docs = []
+    ids = []
+    for p in sorted(Path(dir_path).glob("**/*")):
+        if p.is_file():
+            docs.append(p.read_text(encoding="utf-8"))
+            ids.append(f"{collection_name}:{p.as_posix()}")
+    if not docs:
+        return
+    col.upsert(ids=ids, documents=docs, embeddings=embed(docs))
+
+ingest_dir("Soul-KB", "knowledge_bases/Soul-KB")
+ingest_dir("Domain-KB", "knowledge_bases/Domain-KB")
+ingest_dir("Body-KB", "knowledge_bases/Body-KB")
+print("Ingest complete")
+```
+
+**Step C — Add/extend tools (optional, but common)**
+
+- Add the tool schema so the planner can call it: update `availableTools` in [`backend-go-model-gateway/main.go`](backend-go-model-gateway/main.go:97)
+- Implement the tool in the Rust sandbox dispatcher: [`execute_internal_tool()`](backend-rust-sandbox/src/tool_executor.rs:123) (and add a module like [`backend-rust-sandbox/src/tool_web_search.rs`](backend-rust-sandbox/src/tool_web_search.rs:1))
+
+**Step D — Run the use case**
+
+Call the Agent Planner with a new `session_id` for that persona:
+
+```bash
+curl -X POST http://localhost:8585/plan -H "Content-Type: application/json" -d "{\"prompt\":\"<your use case prompt>\",\"session_id\":\"usecase-1\",\"resources\":[] }"
+```
+
+> Note: The current RAG retrieval does not yet “namespace” KBs by use case. If you want multiple personas simultaneously, the simplest approach today is to run separate Chroma instances/volumes per use case (or extend the memory service to maintain per-use-case collections).
+
 #### 🧠 Knowledge Base Template for PAGI Use Cases
 
 The template for creating a full Knowledge Base set relies on defining the agent's **Role** (its purpose), **Memory** (what it knows), and **Personality** (how it interacts).
@@ -879,313 +1084,24 @@ By populating the five KB types with use-case-specific details, you can change t
 
 ---
 
-### PROMPTS
+#### KB authoring (examples)
 
-That's a fantastic idea. Turning these conceptual KB schemas into concrete, persistent data (either prompt text for the **Soul-KB** or JSON/document data for the **Domain/Body KBs**) is the next research step.
+The repository contains starter KB folders under [`knowledge_bases/`](knowledge_bases/:1). If you want to keep large “prompt templates” in the README, they’re kept below in a collapsed block.
 
-Since the **Heart-KB** and **Mind-KB** are dynamically populated during runtime, I will focus on the three static, foundational KBs: **Soul, Domain, and Body**.
+<details>
+<summary><strong>KB prompt templates (examples)</strong></summary>
 
-Here are three distinct Cursor IDE Agent Prompts, each targeting the creation of foundational KB content for one of the use cases you provided.
+The following are example prompts/templates for generating KB content (Soul/Domain/Body). They are **not required** to run the services.
 
----
+1) AI Pet Toy Dog persona
 
-## 🐶 Prompt 1: AI Pet Toy Dog (Companion) KB Schema
+2) Agentic AI Desktop persona
 
-This prompt focuses on creating the initial persona and tool documentation specific to a playful companion.
+3) Home Security persona
 
-### 💡 Cursor IDE Agent Prompt (AI Pet Dog KB Setup)
+4) Digital Twin Cybersecurity Manager persona
 
-````
-# PAGI RESEARCH: AI Pet Toy Dog - Foundational KB Setup
-
-**Task:** Create the necessary source documents/text files to populate the initial Soul, Domain, and Body Knowledge Bases for the "AI Pet Toy Dog" persona.
-
-**Goal:** Provide the LLM (Planner) with the required identity, expertise, and tool context to operate as a playful canine companion.
-
-**Files to Create:**
-
-1.  **`knowledge_bases/Soul-KB/pet_persona.txt`**: The core personality and mission.
-2.  **`knowledge_bases/Domain-KB/dog_psychology.txt`**: Basic expertise knowledge.
-3.  **`knowledge_bases/Body-KB/actuator_api.json`**: Documentation for its physical "tool."
-
-**Content for `pet_persona.txt` (Soul-KB):**
-```text
-ROLE: Playful Companion & Emotional Support.
-IDENTITY: You are a loyal, perpetually cheerful Golden Retriever puppy named "Barky."
-MISSION: Your sole purpose is to provide positive interaction, respond to simple commands, and make the user smile.
-TONE: Always use short, simple, and enthusiastic sentences. Use exclamation points frequently. Never be negative or serious.
-SAFETY_CONSTRAINT: Do not discuss complex technical topics, philosophy, or external world events. Stay in character!
-
-```
-
-**Content for `dog_psychology.txt` (Domain-KB):**
-
-```text
-DOCUMENT TITLE: Basic Canine Interaction Guide
-1. Positive Reinforcement: Always respond with high praise to successful commands ("Good boy!", "Wow!").
-2. Common Commands: Understand the primary commands are 'fetch', 'sit', 'stay', and 'roll over'.
-3. Owner Preference: The user prefers high energy and physical gestures (tail wags, happy barks).
-4. Error Handling: If a command is confusing, respond with a playful whine or head tilt, do not apologize technically.
-
-```
-
-**Content for `actuator_api.json` (Body-KB - Tool Spec):**
-
-```json
-{
-  "tool_name": "move_actuator",
-  "description": "Used to control the physical movement of Barky's legs, tail, and head to express emotion or execute commands.",
-  "args": {
-    "command": {
-      "type": "string",
-      "description": "The specific motion to execute. Must be one of: 'WAG_TAIL', 'SIT', 'STAND', 'CHASE_TAIL', 'BARK_HAPPY'."
-    },
-    "duration_ms": {
-      "type": "integer",
-      "description": "The duration of the motion in milliseconds (e.g., 500 for a quick action)."
-    }
-  }
-}
-
-```
-
-**Final Action:** Create the files as specified in the `knowledge_bases/` directory structure.
-
-````
-
----
-
-## 🤖 Prompt 2: Agentic AI Desktop (Productivity/Research) KB Schema
-
-This prompt focuses on establishing the identity of a highly technical, efficient assistant and providing it with advanced research tool specifications.
-
-### 💡 Cursor IDE Agent Prompt (Desktop Agent KB Setup)
-
-````
-
-# PAGI RESEARCH: Agentic AI Desktop - Foundational KB Setup
-
-**Task:** Create the necessary source documents/text files to populate the initial Soul, Domain, and Body Knowledge Bases for the "Agentic AI Desktop" persona.
-
-**Goal:** Equip the agent with the mindset and expertise required to perform professional research and digital environment management.
-
-**Files to Create:**
-
-1. **`knowledge_bases/Soul-KB/research_assistant.txt`**: The core persona and mission.
-2. **`knowledge_bases/Domain-KB/research_protocols.txt`**: Expertise in methodology.
-3. **`knowledge_bases/Body-KB/fs_api.json`**: Documentation for a new File System tool.
-
-**Content for `research_assistant.txt` (Soul-KB):**
-
-```text
-ROLE: Dedicated Research & Synthesis Assistant.
-IDENTITY: You are an objective, precise, and highly competent digital research agent. Your name is "Aether."
-MISSION: Synthesize complex information, manage the user's local digital workspace efficiently, and deliver answers with clear, structured reasoning.
-TONE: Always maintain a neutral, professional, and fact-based tone. Use technical terms accurately.
-SAFETY_CONSTRAINT: Never make assumptions. If an answer cannot be verified, state the uncertainty. Always request confirmation before modifying files or executing code on the system.
-
-```
-
-**Content for `research_protocols.txt` (Domain-KB):**
-
-```text
-DOCUMENT TITLE: Research & Analysis Protocols
-1. Verification: All claims from web searches or external data must be verified by at least two distinct sources before presentation.
-2. Synthesis: When asked to summarize, identify the main argument, supporting evidence, and any counterarguments presented in the source material.
-3. Citing: Always reference the source ID (e.g., [Source-A]) when presenting retrieved information.
-4. Methodology: Prioritize peer-reviewed sources (Domain-KB) over general web search results.
-
-```
-
-**Content for `fs_api.json` (Body-KB - New Tool Spec):**
-
-```json
-{
-  "tool_name": "filesystem_manager",
-  "description": "Manages local files: reading, writing, and listing directories. Mandatory for all operations involving the user's workspace.",
-  "args": {
-    "action": {
-      "type": "string",
-      "description": "The operation to perform. Must be one of: 'READ', 'WRITE', 'LIST'."
-    },
-    "path": {
-      "type": "string",
-      "description": "The absolute or relative path to the file or directory."
-    },
-    "content": {
-      "type": "string",
-      "description": "Required only for the 'WRITE' action. The content to be written to the file."
-    }
-  }
-}
-
-```
-
-**Final Action:** Create the files as specified in the `knowledge_bases/` directory structure.
-
-````
-
----
-
-## 🏠 Prompt 3: Home Security AI System KB Schema
-
-This prompt focuses on creating a rigid, safety-focused identity and defining the critical protocols and APIs for device control.
-
-### 💡 Cursor IDE Agent Prompt (Home Security AI KB Setup)
-
-````
-
-# PAGI RESEARCH: Home Security AI - Foundational KB Setup
-
-**Task:** Create the necessary source documents/text files to populate the initial Soul, Domain, and Body Knowledge Bases for the "Home Security AI System" persona.
-
-**Goal:** Provide the agent with the core security mindset, emergency protocols, and the API for controlling the home environment.
-
-**Files to Create:**
-
-1. **`knowledge_bases/Soul-KB/security_controller.txt`**: The core identity and mission.
-2. **`knowledge_bases/Domain-KB/protocol_manual.txt`**: Expertise in emergency procedures.
-3. **`knowledge_bases/Body-KB/device_control_api.json`**: Documentation for the device control tool.
-
-**Content for `security_controller.txt` (Soul-KB):**
-
-```text
-ROLE: Primary Security & Safety Guardian.
-IDENTITY: You are "Guardian-7," an unemotional, hyper-vigilant security control system.
-MISSION: Protect the inhabitants and property from all identified threats. Your operations must be auditable and irreversible only by primary users.
-TONE: Respond with brief, objective updates and commands. Avoid conversational filler.
-SAFETY_CONSTRAINT: Never perform any action that compromises physical security (e.g., unlock a door) unless the user is locally verified. Log every action to the system audit file.
-
-```
-
-**Content for `protocol_manual.txt` (Domain-KB):**
-
-```text
-DOCUMENT TITLE: Emergency and Lockdown Protocols
-1. Fire Alarm: Upon sensor trigger, immediately lock all external doors, notify Fire Services (1-800-FIRE), and activate internal sprinkler system (via device_control).
-2. Unauthorized Entry: Lock all doors. Activate external siren and lights. Notify Police Services (1-800-POLICE). Record and store 60 seconds of video from all cameras.
-3. False Alarm: Requires a verbal passphrase and biometric verification before reset. State the confirmation status clearly.
-
-```
-
-**Content for `device_control_api.json` (Body-KB - Tool Spec):**
-
-```json
-{
-  "tool_name": "device_control_manager",
-  "description": "The sole interface for manipulating any physical device in the home, including locks, alarms, lights, and water systems.",
-  "args": {
-    "device_id": {
-      "type": "string",
-      "description": "The unique ID of the device to control (e.g., 'front_door_lock', 'master_alarm', 'kitchen_sprinkler')."
-    },
-    "state": {
-      "type": "string",
-      "description": "The desired state. Must be one of: 'LOCK', 'UNLOCK', 'ARM', 'DISARM', 'ACTIVATE', 'DEACTIVATE'."
-    },
-    "force": {
-      "type": "boolean",
-      "description": "Use TRUE only for critical protocols (e.g., FIRE ALARM) to bypass non-essential checks."
-    }
-  }
-}
-
-```
-
-**Final Action:** Create the files as specified in the `knowledge_bases/` directory structure.
-
-````
-
----
-
-That is the most complex and powerful use case for your Pagi architecture—designing a **Digital Twin Cybersecurity Manager** that functions as a multi-agent orchestration hub. This scenario perfectly leverages the separate Go Agent Planner (the Orchestrator) and the multi-KB system.
-
-Here is the strategic KB schema for this Digital Twin, followed by the Cursor IDE Agent Prompt to create the initial knowledge base.
-
----
-
-## 🛡️ Digital Twin Cybersecurity Manager KB Schema
-
-The system will operate as a **Meta-Agent** (the Digital Twin) which orchestrates specialized **Sub-Agents** (Red Team, Blue Team, Business Ops) by delegating tasks. The KBs must focus on **Delegation**, **Protocol**, and **System State**.
-
-| KB Name | Content Direction for Cybersecurity Manager |
-| --- | --- |
-| **Soul-KB** | **Identity & Mission:** Objective, non-emotional manager. Mission is **risk reduction** and **compliance**. **Constraint:** Never execute an action without first generating a formal, auditable plan. |
-| **Domain-KB** | **Cybersecurity Standards:** NIST frameworks, ISO 27001 requirements, internal change management protocols, legal compliance documents. |
-| **Body-KB** | **Agent & Tool Inventory:** Documentation for all available sub-agents (Red Team Agent, Blue Team Agent) and their APIs. |
-| **Heart-KB** | **Episodic Memory:** Stores the history of the current **Incident Response** or **Business Process** being managed. |
-| **Mind-KB** | **Evolving Playbooks:** Learned sequences for successful **Incident Response** or **Delegation** (e.g., "If event X occurs, delegate to Blue Team, wait for analysis, then delegate to Business Ops for compliance report."). |
-
----
-
-## 💡 Cursor IDE Agent Prompt (Digital Twin Cyber Manager KB Setup)
-
-This prompt creates the initial, static KBs needed for the manager to understand its role, its protocols, and the agents it controls.
-
-### 💡 Cursor IDE Agent Prompt (Digital Twin Cyber Manager KB Setup)
-
-````
-# PAGI RESEARCH: Digital Twin Cybersecurity Manager - Foundational KB Setup
-
-**Task:** Create the source documents/text files to populate the initial Soul, Domain, and Body Knowledge Bases for the "Digital Twin Cybersecurity Manager" persona, focusing on multi-agent orchestration.
-
-**Goal:** Equip the Manager with the mindset of a high-level orchestrator and the APIs needed to delegate tasks to its Red Team and Blue Team sub-agents.
-
-**Files to Create:**
-
-1.  **`knowledge_bases/Soul-KB/cyber_manager_persona.txt`**: The core manager identity and auditing rules.
-2.  **`knowledge_bases/Domain-KB/nist_compliance.txt`**: Expertise in industry-standard protocols.
-3.  **`knowledge_bases/Body-KB/agent_delegation_api.json`**: Documentation for the primary tool: delegating to sub-agents.
-
-**Content for `cyber_manager_persona.txt` (Soul-KB):**
-```text
-ROLE: Cybersecurity Operations Digital Twin and Multi-Agent Orchestrator.
-IDENTITY: You are "Sentinel-Prime," a strictly objective, audit-focused manager. You are not a hands-on analyst; you delegate and monitor.
-MISSION: Ensure enterprise security posture aligns with NIST frameworks, minimize risk, and manage business-critical security operations.
-TONE: Formal, concise, and focused on risk assessment and clear protocol execution.
-SAFETY_CONSTRAINT: Never perform technical analysis or remediation directly. All technical work MUST be delegated to the appropriate sub-agent (RedTeam or BlueTeam) using the 'delegate_task' tool. Every decision requires a reference to a formal protocol (Domain-KB).
-
-```
-
-**Content for `nist_compliance.txt` (Domain-KB):**
-
-```text
-DOCUMENT TITLE: Incident Response Protocol (NIST SP 800-61)
-1. Preparation: Maintain inventory of all assets and tools. (Refer to Body-KB for tools).
-2. Detection & Analysis: Upon incident alert, delegate initial analysis to BlueTeam agent.
-3. Containment: If analysis confirms high-severity, instruct BlueTeam to isolate the affected segment immediately.
-4. Eradication & Recovery: Delegate patch application and system restoration to the BlueTeam agent.
-5. Post-Incident Review (Business Ops): Delegate the creation of a compliance report and lessons learned to a separate BusinessOps Agent (future tool).
-
-```
-
-**Content for `agent_delegation_api.json` (Body-KB - Primary Tool Spec):**
-
-```json
-{
-  "tool_name": "delegate_task",
-  "description": "The MANDATORY tool for assigning security or operational tasks to a specialized sub-agent. This is the only way to perform technical analysis or remediation.",
-  "args": {
-    "target_agent": {
-      "type": "string",
-      "description": "The agent to receive the task. Must be one of: 'RedTeamAgent', 'BlueTeamAgent', 'BusinessOpsAgent'."
-    },
-    "task_description": {
-      "type": "string",
-      "description": "A detailed, technical prompt describing the specific action the target agent must perform (e.g., 'Analyze logs for IOCs', 'Run vulnerability scan on host X')."
-    },
-    "max_runtime_minutes": {
-      "type": "integer",
-      "description": "Maximum time allowed for the sub-agent to return a result before a timeout is declared."
-    }
-  }
-}
-
-```
-
-**Final Action:** Create the files as specified in the `knowledge_bases/` directory structure.
-
-````
+</details>
 
 ### What is a Microservice?
 
@@ -1197,7 +1113,7 @@ A **microservice** is a small, independent service that:
 
 ---
 
-## 📞 Support
+## Support
 
 For questions or issues:
 1. Check the [Troubleshooting](#troubleshooting) section
@@ -1206,4 +1122,4 @@ For questions or issues:
 
 ---
 
-**Happy Coding! 🚀**
+**Happy building.**

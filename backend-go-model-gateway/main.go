@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +23,10 @@ import (
 	openai "github.com/sashabaranov/go-openai"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/status"
 )
 
 //go:generate protoc --go_out=./proto --go_opt=paths=source_relative --go-grpc_out=./proto --go-grpc_opt=paths=source_relative proto/model.proto
@@ -125,6 +132,44 @@ func normalizeOllamaBaseURL(base string) string {
 	return base + "/v1"
 }
 
+func loadMTLSServerCreds() (credentials.TransportCredentials, bool, error) {
+	serverCertPath := os.Getenv("TLS_SERVER_CERT_PATH")
+	serverKeyPath := os.Getenv("TLS_SERVER_KEY_PATH")
+	caCertPath := os.Getenv("TLS_CA_CERT_PATH")
+
+	// Allow non-TLS local dev unless explicitly configured.
+	if serverCertPath == "" && serverKeyPath == "" && caCertPath == "" {
+		return nil, false, nil
+	}
+	if serverCertPath == "" || serverKeyPath == "" || caCertPath == "" {
+		return nil, false, fmt.Errorf("mTLS misconfigured: TLS_SERVER_CERT_PATH, TLS_SERVER_KEY_PATH, TLS_CA_CERT_PATH must all be set")
+	}
+
+	serverCert, err := tls.LoadX509KeyPair(serverCertPath, serverKeyPath)
+	if err != nil {
+		return nil, false, fmt.Errorf("load server keypair (%s, %s): %w", filepath.Clean(serverCertPath), filepath.Clean(serverKeyPath), err)
+	}
+
+	caPEM, err := os.ReadFile(caCertPath)
+	if err != nil {
+		return nil, false, fmt.Errorf("read CA cert (%s): %w", filepath.Clean(caCertPath), err)
+	}
+	caPool := x509.NewCertPool()
+	if ok := caPool.AppendCertsFromPEM(caPEM); !ok {
+		return nil, false, fmt.Errorf("append CA certs from PEM (%s): no certs parsed", filepath.Clean(caCertPath))
+	}
+
+	conf := &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{serverCert},
+		ClientCAs:    caPool,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		NextProtos:   []string{"h2"},
+	}
+
+	return credentials.NewTLS(conf), true, nil
+}
+
 func initializeLLMClient() (*llmRuntime, error) {
 	provider := llmProvider(strings.ToLower(getEnv("LLM_PROVIDER", defaultProvider)))
 
@@ -166,6 +211,42 @@ type server struct {
 	requestTimeout time.Duration
 }
 
+// healthServer implements the standard gRPC Health Checking Protocol.
+//
+// The goal is to report NOT_SERVING if critical downstream dependencies are
+// unavailable so orchestrators (Docker/K8s) avoid sending traffic prematurely.
+type healthServer struct {
+	grpc_health_v1.UnimplementedHealthServer
+
+	llm       *llmRuntime
+	ragClient *RAGGRPCClient
+}
+
+func (h *healthServer) Check(ctx context.Context, _ *grpc_health_v1.HealthCheckRequest) (*grpc_health_v1.HealthCheckResponse, error) {
+	// 1) LLM client must be initialized.
+	if h.llm == nil || h.llm.Client == nil {
+		return &grpc_health_v1.HealthCheckResponse{Status: grpc_health_v1.HealthCheckResponse_NOT_SERVING}, nil
+	}
+
+	// 2) Memory Service (RAG) should be reachable (best-effort).
+	// If the memory service exports gRPC health, probe it.
+	if h.ragClient != nil && h.ragClient.conn != nil {
+		probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		hc := grpc_health_v1.NewHealthClient(h.ragClient.conn)
+		resp, err := hc.Check(probeCtx, &grpc_health_v1.HealthCheckRequest{Service: ""})
+		if err != nil || resp.GetStatus() != grpc_health_v1.HealthCheckResponse_SERVING {
+			return &grpc_health_v1.HealthCheckResponse{Status: grpc_health_v1.HealthCheckResponse_NOT_SERVING}, nil
+		}
+	}
+
+	return &grpc_health_v1.HealthCheckResponse{Status: grpc_health_v1.HealthCheckResponse_SERVING}, nil
+}
+
+func (h *healthServer) Watch(_ *grpc_health_v1.HealthCheckRequest, _ grpc_health_v1.Health_WatchServer) error {
+	return status.Error(codes.Unimplemented, "Watch is not implemented")
+}
+
 // GetPlan implements modelgateway.ModelGatewayServer.
 func (s *server) GetPlan(ctx context.Context, in *pb.PlanRequest) (*pb.PlanResponse, error) {
 	requestStart := time.Now()
@@ -184,7 +265,21 @@ func (s *server) GetPlan(ctx context.Context, in *pb.PlanRequest) (*pb.PlanRespo
 	}
 
 	lg := logger.NewContextLogger(callCtx)
-	lg.Info("GetPlan", "provider", provider, "model", model, "prompt", in.GetPrompt())
+	resourceTypes := make([]string, 0, len(in.GetResources()))
+	for _, r := range in.GetResources() {
+		if r == nil {
+			continue
+		}
+		resourceTypes = append(resourceTypes, r.GetType())
+	}
+	lg.Info(
+		"GetPlan",
+		"provider", provider,
+		"model", model,
+		"prompt", in.GetPrompt(),
+		"resource_count", len(in.GetResources()),
+		"resource_types", resourceTypes,
+	)
 
 	if s.llm == nil || s.llm.Client == nil {
 		return nil, fmt.Errorf("LLM client not initialized")
@@ -424,9 +519,27 @@ func main() {
 
 	timeoutSec := getEnvInt("REQUEST_TIMEOUT_SECONDS", defaultRequestTimeoutSec)
 
-	s := grpc.NewServer(
-		grpc.StatsHandler(otelgrpc.NewServerHandler()),
-	)
+	serverOpts := []grpc.ServerOption{grpc.StatsHandler(otelgrpc.NewServerHandler())}
+	if creds, enabled, err := loadMTLSServerCreds(); err != nil {
+		log.Fatalf(
+			`{"timestamp": "%s", "level": "fatal", "service": "%s", "error": %q}`,
+			time.Now().Format(time.RFC3339Nano), SERVICE_NAME, err.Error(),
+		)
+	} else if enabled {
+		serverOpts = append(serverOpts, grpc.Creds(creds))
+		log.Printf(
+			`{"timestamp": "%s", "level": "info", "service": "%s", "message": "mTLS enabled for gRPC server."}`,
+			time.Now().Format(time.RFC3339Nano), SERVICE_NAME,
+		)
+	} else {
+		log.Printf(
+			`{"timestamp": "%s", "level": "warn", "service": "%s", "message": "mTLS NOT enabled for gRPC server (TLS_* env vars not set); running insecure."}`,
+			time.Now().Format(time.RFC3339Nano), SERVICE_NAME,
+		)
+	}
+
+	s := grpc.NewServer(serverOpts...)
+	grpc_health_v1.RegisterHealthServer(s, &healthServer{llm: llm, ragClient: vectorClient})
 	pb.RegisterModelGatewayServer(s, &server{llm: llm, vectorDB: vectorClient, requestTimeout: time.Duration(timeoutSec) * time.Second})
 
 	log.Printf(

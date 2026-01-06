@@ -11,6 +11,8 @@ from typing import Any
 
 import chromadb
 
+from sentence_transformers import SentenceTransformer
+
 from opentelemetry import trace
 from opentelemetry.context import attach, detach
 from opentelemetry.propagate import extract
@@ -25,17 +27,17 @@ MIND_KB_NAME = "Mind-KB"
 
 
 class HashEmbeddingFunction:
-	"""Deterministic, dependency-free embedding function for local/dev Chroma usage.
+	"""Backwards-compat placeholder.
 
-	This avoids pulling large embedding model dependencies during early integration.
-	It is NOT semantically meaningful, but it enables end-to-end Chroma persistence
-	and querying for the scaffolding phase.
+	Historically, this service used a deterministic hash embedding to avoid pulling
+	ML dependencies during early scaffolding.
+
+	This is now superseded by SentenceTransformerEmbeddingFunction.
 	"""
 
 	def __init__(self, dim: int = 32):
 		self.dim = dim
 
-	# Chroma v1.4+ embedding-function protocol metadata
 	def name(self) -> str:
 		return "hash_embedding_v1"
 
@@ -47,7 +49,7 @@ class HashEmbeddingFunction:
 		dim = int(config.get("dim", 32)) if isinstance(config, dict) else 32
 		return cls(dim=dim)
 
-	def __call__(self, input: list[str]) -> list[list[float]]:  # Chroma embedding function protocol
+	def __call__(self, input: list[str]) -> list[list[float]]:
 		vectors: list[list[float]] = []
 		for text in input:
 			digest = hashlib.sha256(text.encode("utf-8")).digest()
@@ -56,8 +58,39 @@ class HashEmbeddingFunction:
 		return vectors
 
 
+class SentenceTransformerEmbeddingFunction:
+	"""Semantic embedding function using a locally-loaded SentenceTransformer model.
+
+	This provides meaningful vector search for ChromaDB-backed RAG.
+	"""
+
+	def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+		self.model_name = model_name
+		self._model = SentenceTransformer(model_name)
+
+	# Chroma embedding-function protocol metadata
+	def name(self) -> str:
+		return "sentence_transformers_v1"
+
+	def get_config(self) -> dict[str, Any]:
+		return {"model_name": self.model_name}
+
+	@classmethod
+	def build_from_config(cls, config: dict[str, Any]) -> "SentenceTransformerEmbeddingFunction":
+		model_name = "all-MiniLM-L6-v2"
+		if isinstance(config, dict):
+			model_name = str(config.get("model_name") or model_name)
+		return cls(model_name=model_name)
+
+	def __call__(self, input: list[str]) -> list[list[float]]:
+		# SentenceTransformer.encode returns numpy arrays by default; tolist() converts
+		# to standard Python floats for compatibility with Chroma.
+		embeddings = self._model.encode(input, convert_to_numpy=True)
+		return embeddings.tolist()
+
+
 _chroma_client: chromadb.ClientAPI | None = None
-_embedding_fn = HashEmbeddingFunction(dim=32)
+_embedding_fn = SentenceTransformerEmbeddingFunction(model_name=os.environ.get("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2"))
 
 
 def get_chroma_client() -> chromadb.ClientAPI:
@@ -80,6 +113,36 @@ def get_collection(name: str):
 	# Keep one collection per conceptual KB.
 	client = get_chroma_client()
 	return client.get_or_create_collection(name=name, embedding_function=_embedding_fn)
+
+
+def check_health() -> tuple[bool, str]:
+	"""Deep health check for critical dependencies.
+
+	Returns:
+		(ok, message)
+
+	We intentionally keep this non-destructive:
+	- ChromaDB: heartbeat() if available, else list_collections() as a reachability probe.
+	- SQLite: open DB and execute a trivial query.
+	"""
+	# 1) ChromaDB reachability
+	try:
+		client = get_chroma_client()
+		if hasattr(client, "heartbeat"):
+			client.heartbeat()  # type: ignore[attr-defined]
+		else:
+			client.list_collections()
+	except Exception as e:
+		return False, f"chroma_unhealthy: {e}"
+
+	# 2) SQLite reachability
+	try:
+		with _open_session_db() as conn:
+			conn.execute("SELECT 1").fetchone()
+	except Exception as e:
+		return False, f"sqlite_unhealthy: {e}"
+
+	return True, "ok"
 
 
 def seed_rag_collections() -> None:
@@ -264,6 +327,16 @@ import grpc  # noqa: E402
 import model_pb2  # type: ignore[import-untyped]  # noqa: E402
 import model_pb2_grpc  # type: ignore[import-untyped]  # noqa: E402
 
+# Optional dependency: grpcio-health-checking.
+#
+# We want the Memory service to keep running in bare-metal/dev even if the extra
+# package isn't installed yet. In Docker/CI, requirements.txt includes it.
+try:  # noqa: E402
+	from grpc_health.v1 import health_pb2, health_pb2_grpc  # type: ignore[import-untyped]
+except Exception:  # noqa: E402
+	health_pb2 = None
+	health_pb2_grpc = None
+
 
 class _GRPCMetadataGetter(Getter[list[tuple[str, str]]]):
 	def get(self, carrier: list[tuple[str, str]], key: str) -> list[str] | None:
@@ -312,6 +385,24 @@ class ModelGatewayServicer(model_pb2_grpc.ModelGatewayServicer):
 		return model_pb2.PlanResponse()
 
 
+if health_pb2_grpc is not None and health_pb2 is not None:
+	class HealthServicer(health_pb2_grpc.HealthServicer):
+		"""gRPC Health Checking Protocol implementation."""
+
+		async def Check(self, request, context):
+			ok, msg = check_health()
+			if not ok:
+				context.set_details(msg)
+				return health_pb2.HealthCheckResponse(status=health_pb2.HealthCheckResponse.NOT_SERVING)
+			return health_pb2.HealthCheckResponse(status=health_pb2.HealthCheckResponse.SERVING)
+
+		async def Watch(self, request, context):
+			# Not needed for container/K8s readiness probes.
+			await context.abort(grpc.StatusCode.UNIMPLEMENTED, "Watch is not implemented")
+else:
+	HealthServicer = None  # type: ignore[assignment]
+
+
 _grpc_server: grpc.aio.Server | None = None
 
 
@@ -319,6 +410,8 @@ async def _serve_grpc(port: int) -> None:
 	global _grpc_server
 	server = grpc.aio.server()
 	model_pb2_grpc.add_ModelGatewayServicer_to_server(ModelGatewayServicer(), server)
+	if health_pb2_grpc is not None and HealthServicer is not None:
+		health_pb2_grpc.add_HealthServicer_to_server(HealthServicer(), server)
 	server.add_insecure_port(f"[::]:{port}")
 	await server.start()
 	_grpc_server = server
